@@ -621,9 +621,15 @@ def cmd_cash_max(args) -> None:
     print()
     kv(c("Safe daily spend", BOLD), c(money(safe, store.config), BOLD))
     kv("Monthly equivalent", money(safe * 30, store.config))
-    print(c("\n  This is a cash constraint, not a profitability one. Even a "
-            "product with\n  perfect unit economics cannot outrun a payout "
-            "delay.", DIM))
+    if safe <= 0:
+        print(c(f"\n  ! Contribution margin is "
+                f"{money(ue.contribution_margin, store.config)} - this product "
+                f"loses money on\n    every order, so no daily budget is safe. "
+                f"Fix price or cost first:\n    dropship econ", RED))
+    else:
+        print(c("\n  This is a cash constraint, not a profitability one. Even a "
+                "product with\n  perfect unit economics cannot outrun a payout "
+                "delay.", DIM))
 
 
 def cmd_cash_scenarios(args) -> None:

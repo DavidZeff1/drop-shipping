@@ -978,5 +978,72 @@ class TestCLI(unittest.TestCase):
             self.cli("econ", "does-not-exist")
 
 
+# ------------------------------------------------------------- edge cases --
+
+class TestDegenerateInputs(unittest.TestCase):
+    """Nothing here should crash.
+
+    A tool that raises on a zero-price product is a tool you stop opening, and
+    then you stop making the decisions it exists to make.
+    """
+
+    def setUp(self):
+        self.cfg = base_config()
+        self.ue = base_ue(self.cfg)
+        self.broke = UnitEconomics(price=5.0, cogs=50.0, config=self.cfg)
+
+    def test_zero_and_negative_economics(self):
+        UnitEconomics(price=0.0, cogs=0.0, config=self.cfg).breakdown()
+        self.broke.breakdown()
+        self.broke.sensitivity()
+        self.broke.price_ladder([0.0, 10.0])
+        self.assertEqual(self.broke.breakeven_orders(), float("inf"))
+
+    def test_decisions_on_degenerate_tests(self):
+        for test, ue in [
+            (AdTest(product_id="p", spend=1e6, purchases=100_000), self.ue),
+            (AdTest(product_id="p", spend=0.0, purchases=5), self.ue),
+            (AdTest(product_id="p", spend=100.0, purchases=1), self.broke),
+            (AdTest(product_id="p"), self.ue),
+        ]:
+            d = testing.decide(test, ue, self.cfg)
+            self.assertIn(d.action, {testing.NOT_STARTED, testing.KEEP_TESTING,
+                                     testing.ITERATE, testing.HOLD,
+                                     testing.SCALE, testing.KILL})
+
+    def test_scale_ladder_from_zero_budget(self):
+        self.assertEqual(len(testing.scale_ladder(0.0, self.ue, self.cfg, 3)), 3)
+
+    def test_cashflow_survives_extremes(self):
+        cashflow.simulate(self.ue, self.cfg, 100.0, 25.0, 30, 0.0)
+        cashflow.simulate(self.ue, self.cfg, 100.0, 25.0, 30, -500.0)
+        cashflow.simulate(self.ue, self.cfg, 100.0, 25.0, 1)
+        cashflow.simulate(self.ue, self.cfg, 100.0, 25.0, 60, 2000.0, growth_rate=0.5)
+        self.assertEqual(
+            cashflow.max_safe_daily_spend(self.ue, self.cfg, 25.0, 30, 0.0), 0.0)
+
+    def test_unsellable_product_gets_no_safe_spend(self):
+        self.assertEqual(
+            cashflow.max_safe_daily_spend(self.broke, self.cfg, 25.0, 30), 0.0)
+
+    def test_research_handles_empty_and_zero_priced_products(self):
+        for product in (Product(name=""), Product(name="X", price=0.0, cogs=0.0)):
+            result = research.score_product(product, self.cfg)
+            self.assertFalse(result.passed)
+
+    def test_malformed_dates_do_not_crash_ops(self):
+        ops.check_order(Order(ordered_date="not-a-date", status="received"),
+                        self.cfg)
+        ops.fulfilment_health([Order(ordered_date="", status="delivered",
+                                     delivered_date="nonsense")], self.cfg)
+
+    def test_reports_render_for_an_unsellable_product(self):
+        store = Store(Path(tempfile.mkdtemp()) / "s.json")
+        store.add(Product(name="Bad", price=5.0, cogs=50.0))
+        self.assertIn("</html>", dashboard.render(store))
+        self.assertTrue(daily.build(store).items)
+        self.assertTrue(kpis.build(store.products, [], [], [], self.cfg, 30).alerts)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

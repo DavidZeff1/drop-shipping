@@ -204,7 +204,16 @@ def max_safe_daily_spend(ue: UnitEconomics, config: Config, cpa: float,
 
     ``buffer`` is the fraction of starting cash you refuse to go below. Set it
     to zero only if you enjoy explaining declined supplier payments.
+
+    Returns 0 when contribution margin is non-positive. Strictly as a cash
+    question there is always *some* spend slow enough to survive the horizon -
+    you simply lose money more slowly than you run out of it - but reporting
+    that as "safe" would invite someone to spend it. No daily budget is safe on
+    a product that loses money on every order; the fix is price or cost, not
+    pacing.
     """
+    if ue.contribution_margin <= 0:
+        return 0.0
     cash = config.starting_cash if starting_cash is None else starting_cash
     floor = cash * buffer
 
