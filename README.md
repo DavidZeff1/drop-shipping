@@ -143,6 +143,11 @@ portfolio, a page per product with its economics and live test verdict, the
 order queue, and the settings. It reads and writes the same store through the
 same engine as the CLI, so the two never disagree - use whichever is nearer.
 
+Its **Admin** tab is where everything goes in: add or edit any record -
+products, suppliers, orders, ad tests, cash entries - upload product photos,
+and import a CSV without touching the terminal. It opens with a setup
+checklist of what is still missing and a link to each thing that fixes it.
+
 It listens on this machine only and has no login. Do not expose the port.
 
 ## Somewhere to send the traffic
@@ -227,7 +232,7 @@ python3 -m dropship --store ~/stores/uk.json today
 python3 -m unittest discover -s tests -t .
 ```
 
-168 tests, no dependencies. Weighted toward the statistics and economics,
+176 tests, no dependencies. Weighted toward the statistics and economics,
 where a silent error would poison every decision downstream.
 
 ## Honest limitations

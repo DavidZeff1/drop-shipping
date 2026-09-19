@@ -22,3 +22,6 @@ venv/
 .env
 .env.*
 !.env.example
+
+# Photos uploaded through the admin
+data/photos/

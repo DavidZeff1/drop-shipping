@@ -26,7 +26,8 @@ from dropship import (
 from dropship import suppliers as sup_mod
 from dropship.demo import seed
 from dropship.economics import UnitEconomics
-from dropship.models import AdTest, Config, LedgerEntry, Order, Product, Supplier
+from dropship.models import (PRODUCT_STATES, AdTest, Config, LedgerEntry, Order,
+                             Product, Supplier)
 from dropship.store import Store
 
 
@@ -1289,8 +1290,13 @@ class TestUI(unittest.TestCase):
 
     def test_every_page_renders(self):
         for path in ui.PAGES:
-            if path not in ("/product", "/shop"):
-                self.assertIn("</html>", self.page(path))
+            if path in ("/product", "/shop"):
+                continue
+            if path in ("/admin/list", "/admin/form"):
+                for key in ui.ENTITIES:
+                    self.assertIn("</html>", self.page(path, entity=key))
+                continue
+            self.assertIn("</html>", self.page(path))
         for product in self.reload().products:
             self.assertIn(product.name, self.page("/product", id=product.id))
             self.assertIn("</html>", self.page("/shop", id=product.id))
@@ -1331,13 +1337,15 @@ class TestUI(unittest.TestCase):
             self.app.handle("GET", "/product", {"id": "prd_missing"}, {}).status, 404)
 
     def test_adding_a_product_scores_it(self):
-        result = self.submit("/products/add", name="Desk Lamp Pro", price=59.99,
-                             cogs=9, ship_cost=3, demand=9)
+        result = self.submit("/admin/save", entity="product", name="Desk Lamp Pro",
+                             price=59.99, cogs=9, ship_cost=3, demand=9)
         self.assertIn("msg", result)
         product = self.reload().product(result["id"])
         self.assertEqual(product.name, "Desk Lamp Pro")
         self.assertGreater(product.score, 0)
         self.assertEqual(product.demand, 9)
+        # An untouched status picks up a real lifecycle state, never "".
+        self.assertIn(product.status, PRODUCT_STATES)
 
     def test_recording_results_applies_the_verdict(self):
         pet = self.reload().product("Pet Hair")
@@ -1368,7 +1376,8 @@ class TestUI(unittest.TestCase):
 
     def test_bad_input_is_refused_and_nothing_is_saved(self):
         before = self.path.read_text()
-        self.assertIn("err", self.submit("/products/add", name="X", price="abc", cogs=1))
+        self.assertIn("err", self.submit("/admin/save", entity="product", name="X",
+                                         price="abc", cogs=1))
         self.assertIn("err", self.submit("/settings", confidence=1.5))
         self.assertIn("err", self.submit("/orders/update", id="#1099", status="lost"))
         self.assertEqual(self.path.read_text(), before)
@@ -1391,8 +1400,8 @@ class TestUI(unittest.TestCase):
         self.assertEqual(self.reload().config.payout_delay_days, 14)
 
     def test_user_text_is_escaped(self):
-        result = self.submit("/products/add", name="<script>alert(1)</script>",
-                             price=50, cogs=8)
+        result = self.submit("/admin/save", entity="product",
+                             name="<script>alert(1)</script>", price=50, cogs=8)
         for html in (self.page("/products"), self.page("/product", id=result["id"]),
                      self.page("/", msg="<b>hi</b>")):
             self.assertNotIn("<script>alert(1)</script>", html)
@@ -1403,6 +1412,104 @@ class TestUI(unittest.TestCase):
         self.assertIn("Load demo data", self.page("/"))
         self.assertIn("msg", self.submit("/demo"))
         self.assertIn("err", self.submit("/demo"))
+
+    def test_every_entity_can_be_added_edited_and_deleted(self):
+        """The scaffolding is only worth having if it works for all of them."""
+        samples = {
+            "product": {"name": "Scaffold Widget", "price": "49.99", "cogs": "9"},
+            "supplier": {"name": "Scaffold Supply", "unit_price": "8.40"},
+            "order": {"external_id": "#9001", "revenue": "49.99"},
+            "ledger": {"amount": "-220", "kind": "expense", "category": "software",
+                       "memo": "Shopify"},
+        }
+        for key, values in samples.items():
+            entity = ui.ENTITIES[key]
+            before = len(getattr(self.reload(), entity.collection))
+            self.submit("/admin/save", entity=key, **values)
+            records = getattr(self.reload(), entity.collection)
+            self.assertEqual(len(records), before + 1, key)
+
+            record = records[-1]
+            self.assertIn(record.id, self.page("/admin/list", entity=key))
+            self.assertIn("</html>", self.page("/admin/form", entity=key,
+                                               id=record.id))
+            self.submit("/admin/delete", entity=key, id=record.id)
+            self.assertEqual(len(getattr(self.reload(), entity.collection)),
+                             before, key)
+
+    def test_editing_a_product_rescores_it(self):
+        pet = self.reload().product("Pet Hair")
+        self.submit("/admin/save", entity="product", id=pet.id, name=pet.name,
+                    price="12.00", cogs="9.00", delivery_days="11")
+        edited = self.reload().product(pet.id)
+        self.assertAlmostEqual(edited.price, 12.00)
+        # Margin now fails its gate, so the score and status must follow.
+        self.assertEqual(edited.tier, "reject")
+        self.assertEqual(edited.status, "candidate")
+
+    def test_a_reference_to_a_deleted_record_is_refused(self):
+        result = self.submit("/admin/save", entity="order", external_id="#9002",
+                             product_id="prd_gone")
+        self.assertIn("no longer exists", result["err"])
+
+    def test_admin_home_tracks_what_is_still_missing(self):
+        html = self.page("/admin")
+        self.assertIn("Set up", html)
+        self.assertIn("Add a payment link", html)   # nothing has one yet
+        pet = self.reload().product("Pet Hair")
+        self.submit("/product/shop", id=pet.id, pay_url="https://buy.stripe.com/a")
+        steps = dict((what, done) for done, what, _why, _link
+                     in ui._setup_steps(self.reload()))
+        self.assertTrue(steps["Add a payment link"])
+
+    def test_photos_upload_into_the_store_folder(self):
+        pet = self.reload().product("Pet Hair")
+        png = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+        response = self.app.handle(
+            "POST", "/product/photos", {},
+            {"id": pet.id, "back": f"/product?id={pet.id}"},
+            {"photos": [("holiday snap.png", png)]})
+        self.assertEqual(response.status, 303)
+        saved = self.reload().product(pet.id).photos
+        self.assertEqual(len(saved), 1)
+        path = Path(saved[0])
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.parent, self.path.parent / "photos")
+        # Our name and our extension: nothing from the browser is trusted.
+        self.assertEqual(path.name, f"{pet.id}-1.png")
+
+    def test_a_file_that_is_not_an_image_is_refused(self):
+        pet = self.reload().product("Pet Hair")
+        response = self.app.handle(
+            "POST", "/product/photos", {}, {"id": pet.id},
+            {"photos": [("payload.svg", b"<svg onload=alert(1)>")]})
+        self.assertEqual(response.status, 303)
+        self.assertIn("err", response.location)
+        self.assertEqual(self.reload().product(pet.id).photos, [])
+
+    def test_a_csv_can_be_imported_from_the_browser(self):
+        csv = ("Name,Total,Created at,Lineitem sku\n"
+               "#2001,52.49,2026-09-01,PCP-01\n").encode("utf-8")
+        before = len(self.reload().orders)
+        response = self.app.handle("POST", "/admin/import", {}, {"kind": "orders"},
+                                   {"file": [("orders.csv", csv)]})
+        self.assertEqual(response.status, 303)
+        message = parse_qs(urlsplit(response.location).query)["msg"][0]
+        self.assertIn("1 created", message)
+        orders = self.reload().orders
+        self.assertEqual(len(orders), before + 1)
+        self.assertEqual(orders[-1].external_id, "#2001")
+
+    def test_multipart_parsing_keeps_fields_and_files_apart(self):
+        body = (b"--X\r\n"
+                b'Content-Disposition: form-data; name="kind"\r\n\r\norders\r\n'
+                b"--X\r\n"
+                b'Content-Disposition: form-data; name="file"; filename="a.csv"\r\n'
+                b"Content-Type: text/csv\r\n\r\nid,total\r\n--X--\r\n")
+        form, files = ui._parse_multipart(body, "multipart/form-data; boundary=X")
+        self.assertEqual(form["kind"], "orders")
+        self.assertEqual(files["file"][0][0], "a.csv")
+        self.assertIn(b"id,total", files["file"][0][1])
 
     def test_errors_never_redirect_off_the_machine(self):
         for back in ("//evil.example/", "https://evil.example/", "/\\evil.example"):

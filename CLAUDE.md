@@ -70,6 +70,12 @@ accessibility fallback, not decoration.
 
 ## UI
 
+The admin screens are generated, not written: `ENTITIES` in `ui.py` holds one
+`Entity` per record type and one `Field` per column, and the list, the form,
+the save and the delete all come from that. A new field on a model is a line
+there, not a new page. `after_save` is where a record's engine hook goes —
+products re-score through `research.apply_score` on every save.
+
 `ui.py` layers its styles on the dashboard's `_CSS`, so its controls reuse the
 validated tokens; the same re-validation rule applies. It binds to 127.0.0.1
 with no login, and refuses requests whose `Host` or `Origin` is not its own —

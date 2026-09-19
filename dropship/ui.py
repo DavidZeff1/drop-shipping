@@ -17,20 +17,26 @@ from __future__ import annotations
 import html
 import json
 import math
+import mimetypes
 import re
 import sys
 import threading
 import traceback
 import webbrowser
-from dataclasses import dataclass, fields
+import email
+import tempfile
+from dataclasses import MISSING, dataclass, field, fields
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from . import cashflow, daily, dashboard, ops, research, storefront, testing
+from . import cashflow, daily, dashboard, importers, ops, research, storefront, testing
 from .demo import seed
 from .economics import UnitEconomics, for_product
-from .models import ORDER_STATES, AdTest, Config, Order, Product, today_iso
+from .models import (ORDER_STATES, PRODUCT_STATES, AdTest, Config, LedgerEntry,
+                     Order, Product, Supplier, today_iso)
 from .store import Store
 
 DEFAULT_PORT = 8765
@@ -301,7 +307,7 @@ def _check(label: str, name: str, checked: bool, hint: str = "") -> str:
 # ---------------------------------------------------------------- layout --
 
 NAV = (("/", "Today"), ("/products", "Products"), ("/orders", "Orders"),
-       ("/settings", "Settings"), ("/dashboard", "Dashboard"))
+       ("/admin", "Admin"), ("/settings", "Settings"), ("/dashboard", "Dashboard"))
 
 
 @dataclass
@@ -475,46 +481,21 @@ def page_products(store: Store, query: dict[str, str]) -> str:
             left=(1, 8))
     else:
         table = '<p class="empty">No products yet. Add the first one below.</p>'
+    gates = (f"Gates: price at least {config.min_margin_multiple:g}x landed "
+             f"cost, contribution margin at least "
+             f"{_money(config.min_contribution_margin, config)}, delivery "
+             f"within {config.max_delivery_days:g} days unless stocked "
+             f"locally, nothing restricted or trademarked. Fail one and the "
+             f"product is not tested, whatever it scores.")
     body = ('<h1>Products</h1><p class="sub">Sorted by profit. Margin is the '
             "contribution margin per order: what is left after costs, fees and "
             "expected refunds, before ads. It is the most you can pay for a sale.</p>"
             f'<div class="card">{table}</div>'
-            f"<h2>Add a product</h2>{_add_product_form(store)}")
+            f'<div class="actions">'
+            f'{_link(_url("/admin/form", entity="product"), "Add a product")}'
+            f'{_link("/admin/import", "Import a CSV")}</div>'
+            f'<p class="hint">{_e(gates)}</p>')
     return _layout(store, "Products", body, "/products", query)
-
-
-def _add_product_form(store: Store) -> str:
-    c = store.config
-    suppliers = [("", "None yet")] + [(s.id, s.name) for s in store.suppliers]
-    scores = "".join(_input(label, name, "5", step="1", hi=10, hint=hint)
-                     for label, name, hint in _RESEARCH_FIELDS)
-    gates = (f"Gates: price at least {c.min_margin_multiple:g}x landed cost, "
-             f"contribution margin at least {_money(c.min_contribution_margin, c)}, "
-             f"delivery within {c.max_delivery_days:g} days unless stocked locally, "
-             f"nothing restricted or trademarked. Fail one and the product is not "
-             f"tested, whatever it scores.")
-    return ('<form method="post" action="/products/add" class="card">'
-            + _hidden("back", "/products") + '<div class="fields">'
-            + _input("Name", "name", kind="text", required=True)
-            + _input("Price", "price", required=True, hint="what the customer pays")
-            + _input("Supplier cost", "cogs", required=True, hint="per unit")
-            + _input("Shipping cost", "ship_cost", "0", hint="supplier to customer")
-            + _input("Delivery days", "delivery_days", "14", hint="door to door, as promised")
-            + _select("Supplier", "supplier", suppliers, "")
-            + _input("SKU", "sku", kind="text")
-            + _input("Category", "category", kind="text")
-            + "</div><details><summary>Upsell, research scores and risk flags</summary>"
-            + '<p class="hint">Scores run 0-10 and come from you. The score is only '
-            + "as honest as they are.</p><div class=\"fields\">"
-            + _input("Upsell revenue", "upsell_revenue", "0", hint="extra per order")
-            + _input("Upsell cost", "upsell_cogs", "0")
-            + scores + "</div>"
-            + _check("Stocked in a local warehouse", "local_stock", False)
-            + _check("Restricted or regulated category", "restricted", False)
-            + _check("Trademark or counterfeit risk", "brand_risk", False)
-            + '<div class="fields">' + _input("Notes", "notes", kind="text") + "</div>"
-            + f'</details><p class="hint">{_e(gates)}</p>'
-            + '<div class="actions"><button>Add and score</button></div></form>')
 
 
 # --------------------------------------------------------------- product --
@@ -582,8 +563,15 @@ def _shop_card(product: Product, here: str) -> str:
             f'{_input("Bundle payment link", "bundle_pay_url", product.bundle_pay_url, kind="text", hint="its own link, charging the bundle price")}'
             "</div>"
             '<div class="actions"><button class="ghost">Save</button></div></form>'
-            f'<p class="hint">{_e(photos)}. Photos are files, so they go in from '
-            f"the terminal: <code>{_e(command)}</code></p>"
+            '<form method="post" action="/product/photos" class="order-form" '
+            'enctype="multipart/form-data">'
+            f'{_hidden("id", product.id)}{_hidden("back", here)}'
+            '<label class="f">Add photos<input type="file" name="photos" '
+            'multiple accept="image/*"><span class="hint">jpg, png or webp, '
+            "under 300 KB each so the page loads on mobile data</span></label>"
+            '<button class="ghost">Upload</button></form>'
+            f'<p class="hint">{_e(photos)}. From the terminal instead: '
+            f"<code>{_e(command)}</code></p>"
             f'<div class="actions">{_link(_url("/shop", id=product.id), "Preview the shop page")}'
             f'<span class="hint">Write this page: <code>dropship storefront '
             f'"{_e(product.name)}"</code> &nbsp; The whole shop, with policy '
@@ -1061,35 +1049,6 @@ def _order_from(store: Store, form: dict[str, str]) -> Order:
     return order
 
 
-def act_add_product(store: Store, form: dict[str, str]) -> Response:
-    name = _text(form, "name")
-    if not name:
-        raise _Invalid("Give the product a name.")
-    if not _text(form, "price") or not _text(form, "cogs"):
-        raise _Invalid("Enter both the price and the supplier cost - without them "
-                       "the economics are unknowable.")
-    supplier = store.supplier(_text(form, "supplier"))
-    scores = {key: _whole(form, key, label, 5, 0, 10)
-              for label, key, _ in _RESEARCH_FIELDS}
-    product = Product(
-        name=name, sku=_text(form, "sku"), category=_text(form, "category"),
-        supplier_id=supplier.id if supplier else "",
-        price=_number(form, "price", "Price", 0.0),
-        cogs=_number(form, "cogs", "Supplier cost", 0.0),
-        ship_cost=_number(form, "ship_cost", "Shipping cost", 0.0),
-        upsell_revenue=_number(form, "upsell_revenue", "Upsell revenue", 0.0),
-        upsell_cogs=_number(form, "upsell_cogs", "Upsell cost", 0.0),
-        delivery_days=_number(form, "delivery_days", "Delivery days", 14.0),
-        local_stock=_flag(form, "local_stock"), restricted=_flag(form, "restricted"),
-        brand_risk=_flag(form, "brand_risk"), notes=_text(form, "notes"), **scores)
-    store.add(product)
-    result = research.apply_score(product, store.config)
-    store.save()
-    return _redirect(_url("/product", id=product.id, msg=(
-        f"Added and scored: {result.score:.0f}/100, tier {result.tier}. "
-        f"{result.verdict}")))
-
-
 def act_start_test(store: Store, form: dict[str, str]) -> Response:
     product = _product_from(store, form)
     config = store.config
@@ -1236,15 +1195,7 @@ def act_load_demo(store: Store, form: dict[str, str]) -> Response:
     return _redirect(_url("/", msg="Loaded the demo store. Start at the top of the list."))
 
 
-PAGES = {"/": page_today, "/products": page_products, "/product": page_product,
-         "/orders": page_orders, "/settings": page_settings,
-         "/dashboard": page_dashboard, "/shop": page_shop}
-ACTIONS = {"/products/add": act_add_product, "/product/start": act_start_test,
-           "/product/test": act_record_results, "/product/decide": act_decide,
-           "/product/score": act_rescore, "/product/shop": act_save_shop,
-           "/product/delete": act_delete_product, "/orders/update": act_update_order,
-           "/orders/review": act_review_sent, "/settings": act_save_settings,
-           "/demo": act_load_demo}
+# The route tables live at the end of the module, after the admin section.
 
 
 # ---------------------------------------------------------------- server --
@@ -1262,17 +1213,20 @@ class App:
         self._lock = threading.Lock()
 
     def handle(self, method: str, path: str, query: dict[str, str],
-               form: dict[str, str]) -> Response:
+               form: dict[str, str],
+               files: dict[str, list[tuple[str, bytes]]] | None = None) -> Response:
         try:
             if path == "/favicon.ico":
                 return Response(204)
             if method == "GET" and path in PAGES:
                 result = PAGES[path](Store.load(self.store_path), query)
                 return result if isinstance(result, Response) else Response(200, result)
-            if method == "POST" and path in ACTIONS:
+            if method == "POST" and (path in ACTIONS or path in UPLOADS):
                 with self._lock:
                     store = Store.load(self.store_path)
                     try:
+                        if path in UPLOADS:
+                            return UPLOADS[path](store, form, files or {})
                         return ACTIONS[path](store, form)
                     except _Invalid as exc:
                         return _redirect(_url(_back(form), err=str(exc)))
@@ -1317,18 +1271,25 @@ class _Handler(BaseHTTPRequestHandler):
             return
         url = urlsplit(self.path)
         form: dict[str, str] = {}
+        files: dict[str, list[tuple[str, bytes]]] = {}
         if method == "POST":
+            content_type = self.headers.get("Content-Type", "")
+            upload = content_type.startswith("multipart/form-data")
             try:
                 length = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 length = -1
-            if not 0 <= length <= self.MAX_FORM:
+            if not 0 <= length <= (MAX_UPLOAD if upload else self.MAX_FORM):
                 self._send(Response(400, "Bad form length."))
                 return
-            raw = self.rfile.read(length).decode("utf-8", "replace")
-            form = _first(parse_qs(raw, keep_blank_values=True))
-        self._send(self.server.app.handle(method, url.path, _first(parse_qs(url.query)),
-                                          form))
+            raw = self.rfile.read(length)
+            if upload:
+                form, files = _parse_multipart(raw, content_type)
+            else:
+                form = _first(parse_qs(raw.decode("utf-8", "replace"),
+                                       keep_blank_values=True))
+        self._send(self.server.app.handle(method, url.path,
+                                          _first(parse_qs(url.query)), form, files))
 
     def _send(self, response: Response) -> None:
         body = response.body.encode("utf-8")
@@ -1389,3 +1350,653 @@ def serve(store_path: Path | str, port: int = DEFAULT_PORT,
         print("\nStopped.")
     finally:
         server.server_close()
+
+
+# ----------------------------------------------------------------- admin --
+#
+# One spec per record type. The list, the form, the save and the delete are
+# generated from it, so adding a field is a line here rather than a new page,
+# and every record in the store can be typed in without touching the CLI.
+
+@dataclass
+class Field:
+    name: str
+    label: str
+    kind: str = "money"   # text|textarea|number|int|money|bool|select|ref|date
+    hint: str = ""
+    required: bool = False
+    choices: tuple[tuple[str, str], ...] = ()
+    collection: str = ""  # kind="ref": the store collection to choose from
+    lo: float | None = 0.0
+    hi: float | None = None
+    group: str = "Details"
+
+
+@dataclass
+class Entity:
+    key: str
+    label: str
+    plural: str
+    collection: str       # the Store attribute holding them
+    model: type
+    fields: tuple[Field, ...]
+    columns: tuple[str, ...] = ()
+    blurb: str = ""
+    after_save: Callable[[Store, Any], None] | None = None
+
+
+def _states(values) -> tuple[tuple[str, str], ...]:
+    return tuple((v, v.replace("_", " ")) for v in values)
+
+
+_SCORES = tuple(
+    Field(name, label, "int", hi=10, hint=hint, group="Research scores, 0-10")
+    for label, name, hint in _RESEARCH_FIELDS)
+
+ENTITIES: dict[str, Entity] = {
+    "product": Entity(
+        key="product", label="Product", plural="Products", collection="products",
+        model=Product,
+        blurb="What you sell. Price and supplier cost decide everything "
+              "downstream, so put the real numbers in.",
+        columns=("name", "status", "price", "cogs", "delivery_days"),
+        after_save=lambda store, record: research.apply_score(record, store.config),
+        fields=(
+            Field("name", "Name", "text", required=True, group="Basics"),
+            Field("sku", "SKU", "text", hint="must match your CSV exports",
+                  group="Basics"),
+            Field("category", "Category", "text", group="Basics"),
+            Field("supplier_id", "Supplier", "ref", collection="suppliers",
+                  group="Basics"),
+            Field("status", "Status", "select", choices=_states(PRODUCT_STATES),
+                  group="Basics"),
+            Field("price", "Price", "money", required=True,
+                  hint="what the customer pays", group="Money"),
+            Field("cogs", "Supplier cost", "money", required=True,
+                  hint="per unit", group="Money"),
+            Field("ship_cost", "Shipping cost", "money",
+                  hint="supplier to customer", group="Money"),
+            Field("upsell_revenue", "Upsell revenue", "money",
+                  hint="extra per order", group="Money"),
+            Field("upsell_cogs", "Upsell cost", "money", group="Money"),
+            Field("delivery_days", "Delivery days", "number",
+                  hint="door to door, as promised", group="Money"),
+            *_SCORES,
+            Field("local_stock", "Stocked in a local warehouse", "bool",
+                  group="Risk flags"),
+            Field("restricted", "Restricted or regulated", "bool",
+                  group="Risk flags"),
+            Field("brand_risk", "Trademark or counterfeit risk", "bool",
+                  group="Risk flags"),
+            Field("notes", "Notes", "textarea", group="Risk flags"),
+            Field("pay_url", "Payment link", "text", hint="https only",
+                  group="Shop page"),
+            Field("copy_problem", "The problem", "text",
+                  hint="a noun phrase: pet hair on every cushion",
+                  group="Shop page"),
+            Field("copy_outcome", "The outcome", "text",
+                  hint="a fur-free sofa in one pass", group="Shop page"),
+            Field("bundle_price", "Bundle price", "money",
+                  hint="two of them, at a price for two", group="Shop page"),
+            Field("bundle_pay_url", "Bundle payment link", "text",
+                  group="Shop page"),
+        )),
+    "supplier": Entity(
+        key="supplier", label="Supplier", plural="Suppliers",
+        collection="suppliers", model=Supplier,
+        blurb="Two of them, always. The supplier decides your refund rate, "
+              "which means the supplier decides your margin.",
+        columns=("name", "platform", "country", "unit_price", "sample_ordered"),
+        fields=(
+            Field("name", "Name", "text", required=True, group="Who"),
+            Field("platform", "Platform", "text",
+                  hint="cj, aliexpress, alibaba, a domestic 3PL", group="Who"),
+            Field("country", "Country", "text", group="Who"),
+            Field("contact", "Contact", "text", group="Who"),
+            Field("payment_terms", "Payment terms", "select",
+                  choices=(("prepaid", "prepaid"), ("net15", "net 15"),
+                           ("net30", "net 30")),
+                  hint="terms beat a price cut: they move COGS after you are paid",
+                  group="Who"),
+            Field("unit_price", "Unit price", "money", group="Cost and speed"),
+            Field("ship_cost", "Shipping cost", "money", group="Cost and speed"),
+            Field("handling_days", "Handling days", "number",
+                  hint="order placed to carrier", group="Cost and speed"),
+            Field("transit_days", "Transit days", "number",
+                  hint="carrier to the door", group="Cost and speed"),
+            Field("moq", "Minimum order", "int", group="Cost and speed"),
+            Field("tracking_quality", "Tracking quality", "int", hi=10,
+                  hint="0-10: does the tracking actually update?",
+                  group="Reliability"),
+            Field("defect_rate", "Defect rate", "number", hi=1,
+                  hint="0.03 = 3% arrive broken or wrong", group="Reliability"),
+            Field("response_hours", "Response time, hours", "number",
+                  hint="how fast they answer when something breaks",
+                  group="Reliability"),
+            Field("stock_depth", "Stock depth", "int", hi=10,
+                  hint="0-10: can they absorb a winner?", group="Reliability"),
+            Field("custom_packaging", "Custom packaging", "bool",
+                  group="Reliability"),
+            Field("sample_ordered", "Sample ordered and received", "bool",
+                  hint="until this is ticked, they are not a vetted supplier",
+                  group="Reliability"),
+            Field("sample_notes", "Sample notes", "textarea", group="Reliability"),
+            Field("notes", "Notes", "textarea", group="Reliability"),
+        )),
+    "order": Entity(
+        key="order", label="Order", plural="Orders", collection="orders",
+        model=Order,
+        blurb="Usually imported from your payment provider's CSV. Type one in "
+              "when you take an order another way.",
+        columns=("external_id", "customer", "revenue", "status", "ordered_date"),
+        fields=(
+            Field("external_id", "Order number", "text", hint="e.g. #1042",
+                  group="Order"),
+            Field("product_id", "Product", "ref", collection="products",
+                  group="Order"),
+            Field("quantity", "Quantity", "int", group="Order"),
+            Field("revenue", "Revenue", "money", hint="what they paid",
+                  group="Order"),
+            Field("cogs", "Cost of goods", "money", group="Order"),
+            Field("status", "Status", "select", choices=_states(ORDER_STATES),
+                  group="Order"),
+            Field("customer", "Customer", "text", group="Customer"),
+            Field("email", "Email", "text", group="Customer"),
+            Field("country", "Country", "text", group="Customer"),
+            Field("ordered_date", "Paid on", "date", group="Fulfilment"),
+            Field("placed_date", "Placed with supplier", "date",
+                  group="Fulfilment"),
+            Field("tracking_number", "Tracking number", "text",
+                  group="Fulfilment"),
+            Field("tracking_date", "Tracking issued", "date", group="Fulfilment"),
+            Field("delivered_date", "Delivered", "date", group="Fulfilment"),
+            Field("promised_days", "Promised days", "number", group="Fulfilment"),
+            Field("issue", "Open issue", "text", group="Fulfilment"),
+            Field("notes", "Notes", "textarea", group="Fulfilment"),
+        )),
+    "test": Entity(
+        key="test", label="Ad test", plural="Ad tests", collection="tests",
+        model=AdTest,
+        blurb="Normally started from the product page and updated each evening. "
+              "Edit one here to correct a number.",
+        columns=("id", "channel", "spend", "purchases", "decision"),
+        fields=(
+            Field("product_id", "Product", "ref", collection="products",
+                  required=True, group="Test"),
+            Field("channel", "Channel", "select",
+                  choices=tuple((c, c) for c in CHANNELS), group="Test"),
+            Field("hypothesis", "Hypothesis", "textarea",
+                  hint="what result would prove you wrong?", group="Test"),
+            Field("angle", "Angle", "text", group="Test"),
+            Field("planned_budget", "Planned budget", "money", group="Test"),
+            Field("daily_budget", "Daily budget", "money", group="Test"),
+            Field("started", "Started", "date", group="Test"),
+            Field("ended", "Ended", "date", hint="blank while it runs",
+                  group="Test"),
+            Field("spend", "Spend", "money", group="Totals so far"),
+            Field("impressions", "Impressions", "int", group="Totals so far"),
+            Field("clicks", "Link clicks", "int", group="Totals so far"),
+            Field("landing_views", "Landing page views", "int",
+                  group="Totals so far"),
+            Field("add_to_carts", "Adds to cart", "int", group="Totals so far"),
+            Field("checkouts", "Checkouts", "int", group="Totals so far"),
+            Field("purchases", "Purchases", "int", group="Totals so far"),
+            Field("revenue", "Revenue", "money", group="Totals so far"),
+            Field("notes", "Campaign name", "text",
+                  hint="match it to the ad platform, so imports land here",
+                  group="Totals so far"),
+        )),
+    "ledger": Entity(
+        key="ledger", label="Cash entry", plural="Cash ledger",
+        collection="ledger", model=LedgerEntry,
+        blurb="Anything that moves money. Your cash position, and every "
+              "spending limit built on it, is starting cash plus this list.",
+        columns=("date", "kind", "category", "amount", "memo"),
+        fields=(
+            Field("date", "Date", "date", group="Entry"),
+            Field("kind", "Kind", "select",
+                  choices=(("revenue", "money in"), ("expense", "money out"),
+                           ("payout", "processor payout"), ("refund", "refund")),
+                  group="Entry"),
+            Field("category", "Category", "select",
+                  choices=(("ads", "ads"), ("cogs", "goods"),
+                           ("software", "software"), ("fees", "fees"),
+                           ("payout", "payout"), ("other", "other")),
+                  group="Entry"),
+            Field("amount", "Amount", "money", lo=None,
+                  hint="positive in, negative out: -220 for a bill",
+                  group="Entry"),
+            Field("product_id", "Product", "ref", collection="products",
+                  group="Entry"),
+            Field("memo", "Memo", "text", group="Entry"),
+        )),
+}
+
+
+def _defaults(model: type) -> dict[str, Any]:
+    """A blank record's values, straight from the dataclass."""
+    out: dict[str, Any] = {}
+    for spec in fields(model):
+        if spec.default is not MISSING:
+            out[spec.name] = spec.default
+        elif spec.default_factory is not MISSING:
+            out[spec.name] = spec.default_factory()
+        else:
+            out[spec.name] = ""
+    return out
+
+
+def _record(store: Store, entity: Entity, ident: str):
+    return next((r for r in getattr(store, entity.collection) if r.id == ident),
+                None)
+
+
+def _ref_choices(store: Store, field_spec: Field) -> tuple[tuple[str, str], ...]:
+    records = getattr(store, field_spec.collection, [])
+    return (("", "None"),) + tuple(
+        (r.id, getattr(r, "name", None) or getattr(r, "external_id", None) or r.id)
+        for r in records)
+
+
+def _field_input(store: Store, field_spec: Field, value: Any) -> str:
+    label, name, hint = field_spec.label, field_spec.name, field_spec.hint
+    if field_spec.kind == "bool":
+        return _check(label, name, bool(value), hint)
+    if field_spec.kind == "textarea":
+        tail = f'<span class="hint">{_e(hint)}</span>' if hint else ""
+        return (f'<label class="f">{_e(label)}<textarea name="{name}">'
+                f"{_e(value or '')}</textarea>{tail}</label>")
+    if field_spec.kind == "select":
+        return _select(label, name, list(field_spec.choices), str(value or ""))
+    if field_spec.kind == "ref":
+        return _select(label, name, list(_ref_choices(store, field_spec)),
+                       str(value or ""))
+    if field_spec.kind in ("text", "date"):
+        kind = "date" if field_spec.kind == "date" else "text"
+        return _input(label, name, str(value or ""), kind=kind, hint=hint,
+                      required=field_spec.required)
+    step = "1" if field_spec.kind == "int" else "any"
+    return _input(label, name, _plain(float(value or 0)), step=step,
+                  lo=field_spec.lo, hi=field_spec.hi, hint=hint,
+                  required=field_spec.required)
+
+
+def _entity_values(store: Store, entity: Entity, form: dict[str, str]
+                   ) -> dict[str, Any]:
+    """Read a whole record off the form, refusing anything the engine cannot use."""
+    values: dict[str, Any] = {}
+    blank = _defaults(entity.model)
+    for spec in entity.fields:
+        if spec.kind == "bool":
+            values[spec.name] = _flag(form, spec.name)
+            continue
+        if spec.kind in ("money", "number"):
+            values[spec.name] = _number(form, spec.name, spec.label, 0.0,
+                                        spec.lo if spec.lo is not None else -1e12,
+                                        spec.hi)
+            continue
+        if spec.kind == "int":
+            values[spec.name] = _whole(form, spec.name, spec.label, 0,
+                                       spec.lo if spec.lo is not None else -1e12,
+                                       spec.hi)
+            continue
+        text = _text(form, spec.name)
+        if spec.required and not text:
+            raise _Invalid(f"{spec.label} is needed.")
+        if not text and spec.kind in ("select", "date"):
+            # An untouched status or date takes the model's default rather than
+            # an empty string the rest of the system has no meaning for.
+            text = str(blank.get(spec.name, ""))
+        if text and spec.kind == "select":
+            if text not in {value for value, _ in spec.choices}:
+                raise _Invalid(f"{spec.label}: '{text}' is not one of the options.")
+        if text and spec.kind == "ref":
+            if not _record(store, ENTITIES[_ref_entity(spec.collection)], text):
+                raise _Invalid(f"{spec.label}: that record no longer exists.")
+        if text and spec.kind == "date":
+            try:
+                date.fromisoformat(text)
+            except ValueError:
+                raise _Invalid(f"{spec.label} must look like 2026-09-20.") from None
+        values[spec.name] = text
+    return values
+
+
+def _ref_entity(collection: str) -> str:
+    return next(key for key, e in ENTITIES.items() if e.collection == collection)
+
+
+def _column_labels(entity: Entity) -> dict[str, Field]:
+    return {spec.name: spec for spec in entity.fields}
+
+
+def _cell(store: Store, entity: Entity, record, name: str) -> str:
+    spec = _column_labels(entity).get(name)
+    value = getattr(record, name, "")
+    if spec is None:
+        return _e(value)
+    if spec.kind == "bool":
+        return "yes" if value else "no"
+    if spec.kind == "money":
+        return _money(float(value or 0), store.config)
+    if spec.kind == "ref":
+        target = next((r for r in getattr(store, spec.collection, [])
+                       if r.id == value), None)
+        return _e(getattr(target, "name", "") or "-") if target else "-"
+    return _e(value if value not in ("", None) else "-")
+
+
+def _entity_link(entity: Entity, record=None) -> str:
+    ident = record.id if record is not None else ""
+    return _url("/admin/form", entity=entity.key, id=ident)
+
+
+def page_admin(store: Store, query: dict[str, str]) -> str:
+    steps = _setup_steps(store)
+    done = sum(1 for step in steps if step[0])
+    rows = []
+    for ok, what, why, link in steps:
+        mark = _chip("done", "good") if ok else _chip("to do", "warning")
+        action = "" if ok else f' {_link(link, "Do it")}'
+        rows.append(f'<li><div class="item-head">{mark}'
+                    f'<span class="item-title">{_e(what)}</span></div>'
+                    f'<div class="item-detail">{_e(why)}{action}</div></li>')
+
+    cards = []
+    for entity in ENTITIES.values():
+        count = len(getattr(store, entity.collection))
+        cards.append(
+            f'<div class="card tile"><div class="label">{_e(entity.plural)}</div>'
+            f'<div class="value">{count}</div>'
+            f'<p class="hint">{_e(entity.blurb)}</p>'
+            f'<div class="actions">{_link(_entity_link(entity), "Add one")}'
+            f'{_link(_url("/admin/list", entity=entity.key), "See all")}</div></div>')
+
+    body = (f'<h1>Admin</h1><p class="sub">Everything the system keeps, in one '
+            f"place. {done} of {len(steps)} setup steps done.</p>"
+            f'<h2>Set up</h2><div class="card"><ul class="items">'
+            f'{"".join(rows)}</ul></div>'
+            f'<h2>Records</h2><div class="cols">{"".join(cards)}</div>'
+            f'<h2>Bring in real data</h2><div class="card">'
+            "<p>Export a CSV from your shop, your payment provider or your ad "
+            "platform and drop it in. Column names are matched loosely, so "
+            "platform differences are handled.</p>"
+            f'<div class="actions">{_link("/admin/import", "Import a CSV")}'
+            "</div></div>")
+    return _layout(store, "Admin", body, "/admin", query)
+
+
+def _setup_steps(store: Store) -> list[tuple[bool, str, str, str]]:
+    """(done, what to do, why it matters, where to do it)."""
+    config = store.config
+    sampled = any(s.sample_ordered for s in store.suppliers)
+    return [
+        (config.business_name != "My Store", "Name the store",
+         "It goes on every page a customer sees.", "/settings"),
+        (bool(store.suppliers), "Add a supplier",
+         "Lead time and defect rate drive your refund rate, which drives your "
+         "margin.", _url("/admin/form", entity="supplier")),
+        (sampled, "Order a sample, then tick it off",
+         "A supplier you have never ordered from is not a vetted supplier.",
+         _url("/admin/list", entity="supplier")),
+        (bool(store.products), "Add a product",
+         "Price and supplier cost decide whether any of this can work.",
+         _url("/admin/form", entity="product")),
+        (any(p.photos for p in store.products), "Add product photos",
+         "A product page without photos does not convert, whatever the copy "
+         "says.", "/products"),
+        (any(p.pay_url for p in store.products), "Add a payment link",
+         "The buy button on your shop page needs somewhere to send people.",
+         "/products"),
+        (config.payout_delay_days != 3, "Confirm your payout delay",
+         "Ask your processor. It decides how fast you can scale, and new "
+         "accounts are often 7 to 21 days.", "/settings"),
+        (bool(store.orders), "Bring your orders in",
+         "Every KPI, alert and verdict reads from them.", "/admin/import"),
+        (bool(store.ledger), "Record what you have spent",
+         "Your cash position is starting cash plus this ledger, and every "
+         "spending limit is built on it.", _url("/admin/form", entity="ledger")),
+    ]
+
+
+def _entity_from(query: dict[str, str]) -> Entity | None:
+    return ENTITIES.get(query.get("entity", ""))
+
+
+def page_admin_list(store: Store, query: dict[str, str]) -> str | Response:
+    entity = _entity_from(query)
+    if entity is None:
+        return _not_found(store, "No such kind of record.")
+    records = list(getattr(store, entity.collection))
+    labels = _column_labels(entity)
+    headers = [labels[name].label if name in labels else name.title()
+               for name in entity.columns] + [""]
+    rows = [[_cell(store, entity, record, name) for name in entity.columns]
+            + [_link(_entity_link(entity, record), "Edit")] for record in records]
+    table = (_table(headers, rows, left=(0, 1, len(headers) - 1))
+             if rows else f'<p class="empty">No {_e(entity.plural.lower())} yet.</p>')
+    body = (f"<h1>{_e(entity.plural)}</h1>"
+            f'<p class="sub">{_e(entity.blurb)}</p>'
+            f'<div class="card">{table}</div>'
+            f'<div class="actions">{_link(_entity_link(entity), "Add " + entity.label.lower())}'
+            f'{_link("/admin", "Back to admin")}</div>')
+    return _layout(store, entity.plural, body, "/admin", query)
+
+
+def page_admin_form(store: Store, query: dict[str, str]) -> str | Response:
+    entity = _entity_from(query)
+    if entity is None:
+        return _not_found(store, "No such kind of record.")
+    ident = query.get("id", "")
+    record = _record(store, entity, ident) if ident else None
+    if ident and record is None:
+        return _not_found(store, f"That {entity.label.lower()} no longer exists.")
+    values = _defaults(entity.model) if record is None else \
+        {spec.name: getattr(record, spec.name) for spec in fields(entity.model)}
+
+    groups: dict[str, list[str]] = {}
+    for spec in entity.fields:
+        groups.setdefault(spec.group, []).append(
+            _field_input(store, spec, values.get(spec.name, "")))
+    sections = []
+    for title, inputs in groups.items():
+        sections.append(f"<h2>{_e(title)}</h2>"
+                        f'<div class="card"><div class="fields">'
+                        f'{"".join(inputs)}</div></div>')
+
+    back = _url("/admin/list", entity=entity.key)
+    delete = ""
+    if record is not None:
+        delete = ('<form method="post" action="/admin/delete" class="actions" '
+                  f"onsubmit=\"return confirm('Delete this {entity.label.lower()}?')\">"
+                  f'{_hidden("entity", entity.key)}{_hidden("id", record.id)}'
+                  '<button class="ghost">Delete</button></form>')
+    heading = (f"New {entity.label.lower()}" if record is None
+               else f"Edit {entity.label.lower()}")
+    body = (f"<h1>{_e(heading)}</h1><p class=\"sub\">{_e(entity.blurb)}</p>"
+            f'<form method="post" action="/admin/save">'
+            f'{_hidden("entity", entity.key)}{_hidden("id", ident)}'
+            f'{_hidden("back", back)}{"".join(sections)}'
+            f'<div class="actions"><button>Save</button>'
+            f'{_link(back, "Cancel")}</div></form>{delete}')
+    return _layout(store, heading, body, "/admin", query)
+
+
+def act_admin_save(store: Store, form: dict[str, str]) -> Response:
+    entity = ENTITIES.get(_text(form, "entity"))
+    if entity is None:
+        raise _Invalid("No such kind of record.")
+    ident = _text(form, "id")
+    record = _record(store, entity, ident) if ident else None
+    if ident and record is None:
+        raise _Invalid(f"That {entity.label.lower()} no longer exists.")
+
+    values = _entity_values(store, entity, form)
+    if record is None:
+        record = entity.model(**values)
+        store.add(record)
+        note = f"Added {entity.label.lower()}"
+    else:
+        for name, value in values.items():
+            setattr(record, name, value)
+        note = f"Saved {entity.label.lower()}"
+    if hasattr(record, "updated"):
+        record.updated = today_iso()
+    if entity.after_save:
+        entity.after_save(store, record)
+    store.save()
+
+    label = getattr(record, "name", "") or getattr(record, "external_id", "") \
+        or record.id
+    target = (_url("/product", id=record.id) if entity.key == "product"
+              else _url("/admin/list", entity=entity.key))
+    return _redirect(_url(target, msg=f"{note}: {label}."))
+
+
+def act_admin_delete(store: Store, form: dict[str, str]) -> Response:
+    entity = ENTITIES.get(_text(form, "entity"))
+    record = _record(store, entity, _text(form, "id")) if entity else None
+    if entity is None or record is None:
+        raise _Invalid("That record no longer exists.")
+    store.remove(record)
+    store.save()
+    return _redirect(_url(_url("/admin/list", entity=entity.key),
+                          msg=f"Deleted one {entity.label.lower()}."))
+
+
+# ---------------------------------------------------------------- upload --
+
+MAX_UPLOAD = 25_000_000
+MAX_PHOTO = 8_000_000
+PHOTO_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+               "image/gif": ".gif"}
+
+
+def _parse_multipart(body: bytes, content_type: str
+                     ) -> tuple[dict[str, str], dict[str, list[tuple[str, bytes]]]]:
+    """Fields and files from a multipart form, via the email parser.
+
+    The cgi module went away in 3.13; this is the replacement the standard
+    library actually ships.
+    """
+    message = email.message_from_bytes(
+        b"MIME-Version: 1.0\r\nContent-Type: "
+        + content_type.encode("latin-1", "replace") + b"\r\n\r\n" + body)
+    form: dict[str, str] = {}
+    files: dict[str, list[tuple[str, bytes]]] = {}
+    for part in message.walk():
+        if part.is_multipart():
+            continue
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        payload = part.get_payload(decode=True) or b""
+        filename = part.get_filename()
+        if filename:
+            files.setdefault(str(name), []).append((filename, payload))
+        else:
+            form[str(name)] = payload.decode("utf-8", "replace")
+    return form, files
+
+
+def page_import(store: Store, query: dict[str, str]) -> str:
+    products = [("", "Match by campaign name")] + [(p.id, p.name)
+                                                   for p in store.products]
+    body = ('<h1>Import a CSV</h1><p class="sub">Export from wherever you '
+            "already work. Column names are matched loosely, so platform "
+            "differences and version drift are handled. Re-importing the same "
+            "file updates rather than double-counting.</p>"
+            '<form method="post" action="/admin/import" '
+            'enctype="multipart/form-data" class="card">'
+            f'{_hidden("back", "/admin/import")}'
+            '<div class="fields">'
+            f'{_select("What is in the file", "kind", [("orders", "Orders: Shopify, WooCommerce, Stripe, PayPal"), ("ads", "Ad results: Meta, TikTok, Google")], "orders")}'
+            '<label class="f">CSV file<input type="file" name="file" '
+            'accept=".csv,text/csv" required></label>'
+            f'{_select("Ad rows belong to (ads only)", "product", products, "")}'
+            "</div>"
+            f'{_check("Also record ad spend as cash going out", "ledger", True, "keeps your cash position honest")}'
+            '<div class="actions"><button>Import</button></div></form>'
+            '<p class="hint">Sample files to try: <code>data/samples/'
+            "shopify-orders.csv</code> and <code>data/samples/meta-ads.csv</code></p>")
+    return _layout(store, "Import", body, "/admin", query)
+
+
+def act_import(store: Store, form: dict[str, str],
+               files: dict[str, list[tuple[str, bytes]]]) -> Response:
+    uploads = [(name, blob) for name, blob in files.get("file", []) if blob]
+    if not uploads:
+        raise _Invalid("Choose a CSV file first.")
+    filename, blob = uploads[0]
+    if len(blob) > MAX_UPLOAD:
+        raise _Invalid(f"{filename} is larger than "
+                       f"{MAX_UPLOAD // 1_000_000} MB. Split it, or use the "
+                       f"terminal: dropship import orders <file>")
+    kind = _text(form, "kind") or "orders"
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "upload.csv"
+        path.write_bytes(blob)
+        if kind == "ads":
+            product = store.product(_text(form, "product"))
+            result = importers.import_ads(path, store.tests, store.products,
+                                          product.id if product else "")
+            if _flag(form, "ledger"):
+                store.ledger.extend(
+                    importers.ledger_from_ads(store.tests, store.ledger))
+        else:
+            result = importers.import_orders(path, store.products, store.orders)
+    store.save()
+    warnings = " ".join(result.warnings)
+    return _redirect(_url("/admin/import",
+                          msg=f"{filename}: {result.summary()}. {warnings}".strip()))
+
+
+def act_add_photos(store: Store, form: dict[str, str],
+                   files: dict[str, list[tuple[str, bytes]]]) -> Response:
+    product = _product_from(store, form)
+    here = _url("/product", id=product.id)
+    if _flag(form, "clear"):
+        product.photos = []
+        store.save()
+        return _redirect(_url(here, msg="Photos removed from the shop page."))
+
+    folder = store.path.parent / "photos"
+    saved = []
+    for filename, blob in files.get("photos", []):
+        if not blob:
+            continue
+        if len(blob) > MAX_PHOTO:
+            raise _Invalid(f"{filename} is {len(blob) / 1_000_000:.1f} MB. "
+                           f"Resize it under {MAX_PHOTO // 1_000_000} MB, and "
+                           f"ideally under 300 KB - the page has to load in "
+                           f"2.5s on 4G.")
+        kind, _encoding = mimetypes.guess_type(filename)
+        suffix = PHOTO_TYPES.get(kind or "")
+        if not suffix:
+            raise _Invalid(f"{filename} is not a jpg, png, webp or gif.")
+        folder.mkdir(parents=True, exist_ok=True)
+        # Our own name, our own extension: nothing from the browser is trusted.
+        path = folder / f"{product.id}-{len(product.photos) + len(saved) + 1}{suffix}"
+        path.write_bytes(blob)
+        saved.append(str(path))
+    if not saved:
+        raise _Invalid("Choose at least one photo first.")
+    product.photos = list(product.photos) + saved
+    product.updated = today_iso()
+    store.save()
+    return _redirect(_url(here, msg=f"Added {len(saved)} photo(s) to the shop page."))
+
+
+PAGES = {"/": page_today, "/products": page_products, "/product": page_product,
+         "/orders": page_orders, "/settings": page_settings,
+         "/dashboard": page_dashboard, "/shop": page_shop, "/admin": page_admin,
+         "/admin/list": page_admin_list, "/admin/form": page_admin_form,
+         "/admin/import": page_import}
+ACTIONS = {"/product/start": act_start_test, "/product/test": act_record_results,
+           "/product/decide": act_decide, "/product/score": act_rescore,
+           "/product/shop": act_save_shop, "/product/delete": act_delete_product,
+           "/orders/update": act_update_order, "/orders/review": act_review_sent,
+           "/settings": act_save_settings, "/demo": act_load_demo,
+           "/admin/save": act_admin_save, "/admin/delete": act_admin_delete}
+# Actions that also receive uploaded files.
+UPLOADS = {"/admin/import": act_import, "/product/photos": act_add_photos}
