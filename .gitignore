@@ -1,0 +1,19 @@
+# Local operating data (your real business data stays out of git by default)
+data/store.json
+data/*.local.json
+data/exports/
+*.html
+!playbooks/*.html
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Secrets
+.env
+.env.*
+!.env.example
