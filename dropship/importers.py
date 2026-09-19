@@ -137,7 +137,8 @@ def import_orders(path: Path | str, products: list[Product], orders: list[Order]
                   default_promised_days: float = 14.0) -> ImportResult:
     """Import an order export. Re-importing updates existing orders in place."""
     result = ImportResult()
-    rows = list(csv.DictReader(Path(path).open(newline="", encoding="utf-8-sig")))
+    with Path(path).open(newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
     if not rows:
         result.warnings.append("File is empty.")
         return result
@@ -168,8 +169,9 @@ def import_orders(path: Path | str, products: list[Product], orders: list[Order]
             continue
 
         product = None
-        sku = str(row.get(cmap.get("sku", ""), "")).strip().lower()
-        pname = str(row.get(cmap.get("product_name", ""), "")).strip().lower()
+        raw_sku = str(row.get(cmap.get("sku", ""), "")).strip()
+        raw_name = str(row.get(cmap.get("product_name", ""), "")).strip()
+        sku, pname = raw_sku.lower(), raw_name.lower()
         if sku and sku in by_sku:
             product = by_sku[sku]
         elif pname and pname in by_name:
@@ -177,7 +179,8 @@ def import_orders(path: Path | str, products: list[Product], orders: list[Order]
         elif pname:
             product = next((p for p in products if p.name.lower() in pname), None)
         if product is None and (sku or pname):
-            result.unmatched_products.add(sku or pname)
+            # Report it exactly as the file spells it, so it can be searched for.
+            result.unmatched_products.add(raw_sku or raw_name)
 
         fin = _norm(str(row.get(cmap.get("financial_status", ""), "")))
         ful = _norm(str(row.get(cmap.get("fulfillment_status", ""), "")))
@@ -234,7 +237,8 @@ def import_ads(path: Path | str, tests: list[AdTest], products: list[Product],
     campaigns after the product pays off.
     """
     result = ImportResult()
-    rows = list(csv.DictReader(Path(path).open(newline="", encoding="utf-8-sig")))
+    with Path(path).open(newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
     if not rows:
         result.warnings.append("File is empty.")
         return result
