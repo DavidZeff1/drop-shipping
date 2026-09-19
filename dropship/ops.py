@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 
-from .models import Config, Order
+from .models import ORDER_STATES, Config, Order
 
 # Days after which each state is a problem. Tight on purpose: every one of
 # these thresholds sits well inside the chargeback window.
@@ -97,7 +97,9 @@ def check_order(order: Order, config: Config, today: date | None = None
                 "Place with supplier today.")
 
     elif order.status in ("placed", "awaiting_tracking") and not order.tracking_number:
-        since = _days_since(order.placed_date, today) or age
+        # Placed today is 0 days, not "unknown" - only a missing date falls back.
+        placed = _days_since(order.placed_date, today)
+        since = age if placed is None else placed
         if since > SLA["tracking"]:
             add("high",
                 f"No tracking {since} days after placing",
@@ -148,6 +150,44 @@ def check_order(order: Order, config: Config, today: date | None = None
             "damaged_item")
 
     return actions
+
+
+def update_order(order: Order, status: str | None = None,
+                 tracking_number: str | None = None, issue: str | None = None,
+                 review_requested: bool = False, today: date | None = None) -> None:
+    """Record a fulfilment step, stamping the dates the SLA checks read.
+
+    ``None`` leaves a field alone. Without the stamps, an order marked placed
+    today would be judged against the day it was paid for.
+    """
+    stamp = (today or date.today()).isoformat()
+    if status is not None and status not in ORDER_STATES:
+        raise ValueError(f"unknown order status '{status}'. "
+                         f"Options: {', '.join(ORDER_STATES)}")
+    target = order.status if status is None else status
+
+    if tracking_number is not None:
+        tracking_number = tracking_number.strip()
+        if tracking_number != order.tracking_number:
+            # Tracking on a placed order means it has shipped, and only an
+            # order in transit is watched for late or stalled delivery.
+            if (tracking_number and not order.tracking_number
+                    and target == order.status
+                    and target in ("placed", "awaiting_tracking")):
+                target = "in_transit"
+            order.tracking_number = tracking_number
+            order.tracking_date = stamp if tracking_number else ""
+
+    order.status = target
+    if target in ("placed", "awaiting_tracking", "in_transit", "delivered") \
+            and not order.placed_date:
+        order.placed_date = stamp
+    if target == "delivered" and not order.delivered_date:
+        order.delivered_date = stamp
+    if issue is not None:
+        order.issue = issue.strip()
+    if review_requested and "review" not in order.notes.lower():
+        order.notes = f"{order.notes}\nreview requested {stamp}".strip()
 
 
 def action_queue(orders: list[Order], config: Config, today: date | None = None

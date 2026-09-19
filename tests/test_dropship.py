@@ -9,17 +9,22 @@ from __future__ import annotations
 
 import io
 import contextlib
+import http.client
 import math
 import tempfile
+import threading
 import unittest
+from dataclasses import fields
 from datetime import date, timedelta
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from dropship import (
     cashflow, cli, dashboard, daily, importers, kpis, listings, ops,
-    research, stats, testing,
+    research, stats, testing, ui,
 )
 from dropship import suppliers as sup_mod
+from dropship.demo import seed
 from dropship.economics import UnitEconomics
 from dropship.models import AdTest, Config, LedgerEntry, Order, Product, Supplier
 from dropship.store import Store
@@ -239,6 +244,22 @@ class TestResearch(unittest.TestCase):
         self.assertGreaterEqual(suggested / product.landed_cost,
                                 cfg.min_margin_multiple)
 
+    def test_apply_score_moves_candidates_but_not_live_products(self):
+        cfg = base_config()
+        great = dict(price=59.99, cogs=8.0, ship_cost=2.5, demand=9, competition=3,
+                     creative_potential=9, problem_solving=9, wow_factor=9,
+                     seasonality=9, return_risk=1, delivery_days=8)
+        candidate = Product(name="Great", **great)
+        research.apply_score(candidate, cfg)
+        self.assertEqual((candidate.status, candidate.tier), ("approved", "A"))
+        live = Product(name="Live", status="scaling", **great)
+        research.apply_score(live, cfg)
+        self.assertEqual(live.status, "scaling")
+        thin = Product(name="Thin", price=15.0, cogs=8.0, ship_cost=2.0,
+                       status="approved")
+        research.apply_score(thin, cfg)
+        self.assertEqual(thin.status, "candidate")
+
     def test_rank_puts_passing_products_first(self):
         good = Product(name="Good", price=59.99, cogs=8.0, ship_cost=2.0, demand=9)
         bad = Product(name="Bad", price=10.0, cogs=8.0, ship_cost=2.0)
@@ -351,6 +372,23 @@ class TestDecisionEngine(unittest.TestCase):
         needed = -math.log(1 - self.cfg.confidence) * self.ue.breakeven_cpa
         self.assertGreaterEqual(plan.total_budget, needed)
         self.assertEqual(len(plan.checkpoints), 4)
+
+    def test_apply_decision_records_the_verdict_on_both_records(self):
+        product = Product(name="Loser", status="testing")
+        loser = self.make(spend=500, impressions=80000, clicks=1100,
+                          landing_views=950, add_to_carts=70, checkouts=25,
+                          purchases=5, revenue=280.0)
+        testing.apply_decision(loser, product, testing.decide(loser, self.ue, self.cfg))
+        self.assertEqual(product.status, "killed")
+        self.assertTrue(loser.ended)
+
+        other = Product(name="Marginal", status="testing")
+        held = self.make(spend=300, impressions=50000, clicks=700,
+                         landing_views=600, add_to_carts=60, checkouts=30,
+                         purchases=9, revenue=504.0)
+        testing.apply_decision(held, other, testing.decide(held, self.ue, self.cfg))
+        self.assertEqual((other.status, held.decision, held.ended),
+                         ("testing", testing.HOLD, ""))
 
     def test_scale_ladder_climbs_and_carries_stop_losses(self):
         ladder = testing.scale_ladder(50.0, self.ue, self.cfg, steps=4)
@@ -552,6 +590,38 @@ class TestOps(unittest.TestCase):
     def test_unknown_macro_raises(self):
         with self.assertRaises(KeyError):
             ops.render_macro("does_not_exist")
+
+    def test_order_placed_today_is_judged_from_today(self):
+        """Placed today is 0 days, not a missing date - no instant tracking alarm."""
+        order = Order(external_id="#6", status="placed", revenue=50.0,
+                      ordered_date=self.ago(5), placed_date=self.ago(0))
+        self.assertEqual(ops.check_order(order, self.cfg, self.today), [])
+
+    def test_update_order_stamps_the_dates_the_sla_reads(self):
+        order = Order(external_id="#7", status="awaiting_supplier",
+                      ordered_date=self.ago(4))
+        ops.update_order(order, status="placed", today=self.today)
+        self.assertEqual(order.placed_date, self.today.isoformat())
+        ops.update_order(order, status="placed", tracking_number="LP1",
+                         today=self.today)
+        self.assertEqual(order.status, "in_transit")  # tracking means it shipped
+        self.assertEqual(order.tracking_date, self.today.isoformat())
+        ops.update_order(order, status="delivered", today=self.today)
+        self.assertEqual(order.delivered_date, self.today.isoformat())
+
+    def test_update_order_touches_only_what_it_is_given(self):
+        order = Order(external_id="#8", status="delivered", tracking_number="LP1",
+                      issue="dented", ordered_date=self.ago(9),
+                      delivered_date=self.ago(4))
+        ops.update_order(order, review_requested=True, today=self.today)
+        self.assertEqual((order.status, order.tracking_number, order.issue),
+                         ("delivered", "LP1", "dented"))
+        self.assertFalse(any("review" in a.issue for a in
+                             ops.check_order(order, self.cfg, self.today)))
+
+    def test_update_order_rejects_an_unknown_status(self):
+        with self.assertRaises(ValueError):
+            ops.update_order(Order(), status="lost_in_space")
 
     def test_unfilled_macro_slots_stay_visible(self):
         text = ops.render_macro("wismo", name="Alex")
@@ -976,6 +1046,170 @@ class TestCLI(unittest.TestCase):
     def test_unknown_product_exits(self):
         with self.assertRaises(SystemExit):
             self.cli("econ", "does-not-exist")
+
+    def test_ui_command_is_registered(self):
+        args = cli.build_parser().parse_args(["ui", "--port", "0", "--no-browser"])
+        self.assertIs(args.func, cli.cmd_ui)
+        self.assertTrue(args.no_browser)
+
+
+# ---------------------------------------------------------------------- ui --
+
+class TestUI(unittest.TestCase):
+    """Every page renders, and every form lands in the store the way the CLI would."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "store.json"
+        seed(Store(self.path)).save()
+        self.app = ui.App(self.path)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def page(self, path: str, **query) -> str:
+        response = self.app.handle("GET", path, query, {})
+        self.assertEqual(response.status, 200, response.body[:300])
+        return response.body
+
+    def submit(self, path: str, **form) -> dict[str, str]:
+        """Post a form; return the query of the redirect, flash message included."""
+        response = self.app.handle("POST", path, {},
+                                   {k: str(v) for k, v in form.items()})
+        self.assertEqual(response.status, 303, response.body[:300])
+        return {k: v[0] for k, v in parse_qs(urlsplit(response.location).query).items()}
+
+    def reload(self) -> Store:
+        return Store.load(self.path)
+
+    def test_every_page_renders(self):
+        for path in ui.PAGES:
+            if path != "/product":
+                self.assertIn("</html>", self.page(path))
+        for product in self.reload().products:
+            self.assertIn(product.name, self.page("/product", id=product.id))
+
+    def test_today_links_each_item_to_the_page_that_fixes_it(self):
+        lamp = self.reload().product("LED")
+        html = self.page("/")
+        self.assertIn(f'href="/product?id={lamp.id}"', html)  # its KILL item
+        self.assertIn('href="/orders"', html)                   # the unplaced orders
+
+    def test_unknown_pages_and_products_are_404s(self):
+        self.assertEqual(self.app.handle("GET", "/nope", {}, {}).status, 404)
+        self.assertEqual(
+            self.app.handle("GET", "/product", {"id": "prd_missing"}, {}).status, 404)
+
+    def test_adding_a_product_scores_it(self):
+        result = self.submit("/products/add", name="Desk Lamp Pro", price=59.99,
+                             cogs=9, ship_cost=3, demand=9)
+        self.assertIn("msg", result)
+        product = self.reload().product(result["id"])
+        self.assertEqual(product.name, "Desk Lamp Pro")
+        self.assertGreater(product.score, 0)
+        self.assertEqual(product.demand, 9)
+
+    def test_recording_results_applies_the_verdict(self):
+        pet = self.reload().product("Pet Hair")
+        self.submit("/product/start", id=pet.id, channel="meta",
+                    hypothesis="Pet owners buy on a silent demo")
+        store = self.reload()
+        self.assertEqual(store.product(pet.id).status, "testing")
+        test = store.active_test(pet.id)
+        result = self.submit("/product/test", id=test.id, spend=400, purchases=0,
+                             clicks=300, impressions=50000)
+        self.assertIn("KILL", result["msg"])
+        store = self.reload()
+        self.assertEqual(store.product(pet.id).status, "killed")
+        self.assertTrue(store.test(test.id).ended)
+
+    def test_verdict_button_applies_a_pending_kill(self):
+        store = self.reload()
+        lamp = store.product("LED")
+        self.submit("/product/decide", id=store.active_test(lamp.id).id)
+        self.assertEqual(self.reload().product(lamp.id).status, "killed")
+
+    def test_a_product_that_fails_its_gates_cannot_start_a_test(self):
+        scraper = self.reload().product("Silicone")
+        result = self.submit("/product/start", id=scraper.id, channel="meta",
+                             hypothesis="x", back=f"/product?id={scraper.id}")
+        self.assertIn("blockers", result["err"])
+        self.assertEqual(self.reload().tests_for(scraper.id), [])
+
+    def test_bad_input_is_refused_and_nothing_is_saved(self):
+        before = self.path.read_text()
+        self.assertIn("err", self.submit("/products/add", name="X", price="abc", cogs=1))
+        self.assertIn("err", self.submit("/settings", confidence=1.5))
+        self.assertIn("err", self.submit("/orders/update", id="#1099", status="lost"))
+        self.assertEqual(self.path.read_text(), before)
+
+    def test_placing_an_order_clears_its_critical_flag(self):
+        order = self.reload().order("#1099")
+        self.submit("/orders/update", id=order.id, status="placed", tracking="",
+                    issue="")
+        store = self.reload()
+        self.assertFalse(any(a.external_id == "#1099" and a.severity == "critical"
+                             for a in ops.action_queue(store.orders, store.config)))
+
+    def test_settings_cover_every_config_field(self):
+        shown = {name for _, group in ui.SETTINGS for name, _, _ in group}
+        self.assertEqual(shown, {f.name for f in fields(Config)} - {"created"})
+
+    def test_settings_save(self):
+        result = self.submit("/settings", payout_delay_days=14)
+        self.assertIn("payout_delay_days 5 -> 14", result["msg"])
+        self.assertEqual(self.reload().config.payout_delay_days, 14)
+
+    def test_user_text_is_escaped(self):
+        result = self.submit("/products/add", name="<script>alert(1)</script>",
+                             price=50, cogs=8)
+        for html in (self.page("/products"), self.page("/product", id=result["id"]),
+                     self.page("/", msg="<b>hi</b>")):
+            self.assertNotIn("<script>alert(1)</script>", html)
+            self.assertNotIn("<b>hi</b>", html)
+
+    def test_demo_loads_only_into_an_empty_store(self):
+        self.app = ui.App(Path(self.tmp.name) / "empty.json")
+        self.assertIn("Load demo data", self.page("/"))
+        self.assertIn("msg", self.submit("/demo"))
+        self.assertIn("err", self.submit("/demo"))
+
+    def test_errors_never_redirect_off_the_machine(self):
+        for back in ("//evil.example/", "https://evil.example/", "/\\evil.example"):
+            self.assertEqual(ui._back({"back": back}), "/")
+        self.assertEqual(ui._back({"back": "/orders"}), "/orders")
+
+    def test_an_unreadable_store_names_the_backup(self):
+        self.path.write_text("{not json")
+        response = self.app.handle("GET", "/", {}, {})
+        self.assertEqual(response.status, 500)
+        self.assertIn("store.bak.json", response.body)
+
+    def test_server_refuses_cross_site_requests(self):
+        server = ui.make_server(self.path, 0)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        own = f"http://127.0.0.1:{server.server_port}"
+
+        def status(method: str, path: str, **headers) -> int:
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_port,
+                                              timeout=10)
+            body = "payout_delay_days=99" if method == "POST" else None
+            try:
+                conn.request(method, path, body=body, headers={
+                    "Content-Type": "application/x-www-form-urlencoded", **headers})
+                return conn.getresponse().status
+            finally:
+                conn.close()
+
+        self.assertEqual(status("GET", "/"), 200)
+        self.assertEqual(status("GET", "/", Host="evil.example"), 403)
+        self.assertEqual(status("POST", "/settings", Origin="http://evil.example"), 403)
+        self.assertEqual(status("POST", "/settings", Origin="null"), 403)
+        self.assertEqual(self.reload().config.payout_delay_days, 5)
+        self.assertEqual(status("POST", "/settings", Origin=own), 303)
+        self.assertEqual(self.reload().config.payout_delay_days, 99)
 
 
 # ------------------------------------------------------------- edge cases --

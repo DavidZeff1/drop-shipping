@@ -231,11 +231,7 @@ def cmd_product_add(args) -> None:
         local_stock=args.local_stock, notes=args.notes or "",
     )
     store.add(product)
-    result = research.score_product(product, store.config)
-    product.score, product.tier = result.score, result.tier
-    product.test_budget = result.recommended_test_budget
-    product.status = "approved" if result.passed and result.tier in ("A", "B") \
-        else "candidate"
+    result = research.apply_score(product, store.config)
     store.save()
     print(f"Added {c(product.name, BOLD)} ({product.id})")
     _print_research(result, product, store)
@@ -297,14 +293,7 @@ def cmd_product_score(args) -> None:
     if not targets:
         sys.exit("No products. Add one: dropship product add --name '...'")
     for product in targets:
-        result = research.score_product(product, store.config)
-        product.score, product.tier = result.score, result.tier
-        product.test_budget = result.recommended_test_budget
-        product.updated = today_iso()
-        if product.status == "candidate" and result.passed and result.tier in ("A", "B"):
-            product.status = "approved"
-        if not result.passed and product.status in ("candidate", "approved"):
-            product.status = "candidate"
+        result = research.apply_score(product, store.config)
         if args.all:
             flag = c("OK ", GREEN) if result.passed else c("REJ", RED)
             print(f"  {flag} {result.score:>5.1f} {result.tier:<6} {result.name}")
@@ -469,7 +458,6 @@ def _decide_and_print(store: Store, test: AdTest) -> None:
         sys.exit("Test is not linked to a product.")
     ue = for_product(product, store.config)
     d = testing.decide(test, ue, store.config)
-    test.decision, test.decision_date = d.action, today_iso()
 
     header(f"Verdict: {c(d.action, ACTION_COLOUR.get(d.action, ''))}")
     print(f"  {c(d.headline, BOLD)}\n")
@@ -497,14 +485,7 @@ def _decide_and_print(store: Store, test: AdTest) -> None:
     header("Do this")
     bullets(d.next_steps, ">")
 
-    # Reflect the verdict in product state so the portfolio stays truthful.
-    if d.action == testing.KILL:
-        product.status = "killed"
-        test.ended = today_iso()
-    elif d.action == testing.SCALE:
-        product.status = "scaling"
-    elif d.action == testing.ITERATE:
-        product.status = "iterating"
+    testing.apply_decision(test, product, d)
     store.save()
 
 
@@ -959,6 +940,11 @@ def cmd_dashboard(args) -> None:
     print(c("  Open it in a browser. Works offline, no dependencies.", DIM))
 
 
+def cmd_ui(args) -> None:
+    from .ui import serve
+    serve(args.store, args.port, open_browser=not args.no_browser)
+
+
 def cmd_doctor(args) -> None:
     """Check the config against reality before it costs you money."""
     store = load(args)
@@ -1028,6 +1014,7 @@ def build_parser() -> argparse.ArgumentParser:
   dropship demo                        load example data to explore
   dropship today                       what to do right now
   dropship doctor                      check your assumptions
+  dropship ui                          the same, in a browser
 """)
     p.add_argument("--store", default=str(DEFAULT_PATH),
                    help="path to the data file (default: data/store.json)")
@@ -1224,6 +1211,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--out", default="dashboard.html")
     s.add_argument("--days", type=int, default=90)
     s.set_defaults(func=cmd_dashboard)
+
+    s = sub.add_parser("ui", help="a basic web interface on this machine")
+    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--no-browser", action="store_true",
+                   help="do not open a browser tab")
+    s.set_defaults(func=cmd_ui)
 
     sub.add_parser("doctor", help="check your assumptions before they cost money"
                    ).set_defaults(func=cmd_doctor)

@@ -32,11 +32,17 @@ plus written playbooks (`playbooks/`).
 | `daily.py` | The `today` briefing and the portfolio view |
 | `importers.py` | CSV import with fuzzy column matching |
 | `dashboard.py` | Offline single-file HTML |
+| `ui.py` | Local web interface on `http.server`: pages and forms over the engine |
 | `cli.py` | Argparse entry point |
 | `demo.py` | Seed data |
 
 Dependency direction is one-way: `stats` → `economics` → everything else.
-`cli` and `dashboard` import from the rest and are imported by nothing.
+`cli`, `ui` and `dashboard` sit on top: they import from the rest, and the rest
+never imports them.
+
+State changes that both front ends make live in the engine, not in a command
+or a page handler: `research.apply_score`, `testing.apply_decision`,
+`ops.update_order`. Add new ones there too, so the CLI and the UI cannot drift.
 
 ## Changing the economics
 
@@ -60,6 +66,15 @@ The palette is validated for colour-vision deficiency and contrast in both
 light and dark modes. If you change a chart colour, re-validate rather than
 eyeballing it, and keep the table view under each chart — it is the
 accessibility fallback, not decoration.
+
+## UI
+
+`ui.py` layers its styles on the dashboard's `_CSS`, so its controls reuse the
+validated tokens; the same re-validation rule applies. It binds to 127.0.0.1
+with no login, and refuses requests whose `Host` or `Origin` is not its own —
+that is what stops any other web page from posting to it while it runs. Keep
+both checks. Every page reads the store fresh; every write loads, changes and
+saves under one lock.
 
 ## Tone
 

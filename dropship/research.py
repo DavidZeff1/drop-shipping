@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .economics import UnitEconomics, for_product
-from .models import Config, Product
+from .models import Config, Product, today_iso
 
 # Categories that are either policy-banned on the major ad platforms, legally
 # regulated, or reliably generate chargebacks. Not exhaustive - check the
@@ -222,6 +222,24 @@ def score_product(product: Product, config: Config) -> ResearchResult:
             f"unforgiving - raise price or add an upsell before you launch."
         )
 
+    return result
+
+
+def apply_score(product: Product, config: Config) -> ResearchResult:
+    """Score a product and record the result on it.
+
+    A candidate that clears the gates at tier A or B is promoted to approved;
+    one that fails a gate drops back to candidate. A product already in a test
+    or on sale keeps its status - a re-score is not a verdict on a test.
+    """
+    result = score_product(product, config)
+    product.score, product.tier = result.score, result.tier
+    product.test_budget = result.recommended_test_budget
+    product.updated = today_iso()
+    if product.status == "candidate" and result.passed and result.tier in ("A", "B"):
+        product.status = "approved"
+    if not result.passed and product.status in ("candidate", "approved"):
+        product.status = "candidate"
     return result
 
 

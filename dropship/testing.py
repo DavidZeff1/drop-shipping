@@ -19,7 +19,7 @@ import math
 from dataclasses import dataclass, field
 
 from .economics import UnitEconomics
-from .models import AdTest, Config
+from .models import AdTest, Config, Product, today_iso
 from .stats import poisson_rate_ci, poisson_pmf_zero, wilson_interval
 
 # Decisions, in the order they get more expensive to get wrong.
@@ -306,6 +306,23 @@ def decide(test: AdTest, ue: UnitEconomics, config: Config) -> Decision:
 
     _attach_fix_steps(d, test)
     return d
+
+
+# Where each verdict moves the product. HOLD and KEEP_TESTING move nothing:
+# the test is still buying its answer.
+STATUS_AFTER = {KILL: "killed", SCALE: "scaling", ITERATE: "iterating"}
+
+
+def apply_decision(test: AdTest, product: Product, d: Decision) -> None:
+    """Record a verdict on the test and the product, so the portfolio stays truthful.
+
+    A kill also ends the test, which takes it out of the daily briefing.
+    """
+    test.decision, test.decision_date = d.action, today_iso()
+    if d.action in STATUS_AFTER:
+        product.status = STATUS_AFTER[d.action]
+    if d.action == KILL:
+        test.ended = today_iso()
 
 
 def _attach_fix_steps(d: Decision, test: AdTest) -> None:

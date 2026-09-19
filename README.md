@@ -49,6 +49,7 @@ python3 -m dropship demo        # load an example store and look around
 python3 -m dropship today
 python3 -m dropship portfolio
 python3 -m dropship dashboard   # writes dashboard.html, opens offline
+python3 -m dropship ui          # the same, clickable, in your browser
 ```
 
 When you are ready with your own:
@@ -123,10 +124,24 @@ import orders  Shopify / WooCommerce CSV export
 import ads     Meta / TikTok / Google CSV export
 kpi            blended performance with threshold-aware alerts
 dashboard      offline single-file HTML
+ui             a basic web interface on this machine
 config         show / set
 ```
 
 `--help` works on every command.
+
+## Prefer clicking?
+
+```bash
+python3 -m dropship ui
+```
+
+Opens a basic web interface at http://127.0.0.1:8765: today's briefing, the
+portfolio, a page per product with its economics and live test verdict, the
+order queue, and the settings. It reads and writes the same store through the
+same engine as the CLI, so the two never disagree - use whichever is nearer.
+
+It listens on this machine only and has no login. Do not expose the port.
 
 ## Bring your real data
 
@@ -175,7 +190,7 @@ python3 -m dropship --store ~/stores/uk.json today
 python3 -m unittest discover -s tests -t .
 ```
 
-116 tests, no dependencies. Weighted toward the statistics and economics,
+147 tests, no dependencies. Weighted toward the statistics and economics,
 where a silent error would poison every decision downstream.
 
 ## Honest limitations
