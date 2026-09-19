@@ -1,5 +1,6 @@
-# Local operating data (your real business data stays out of git by default)
-data/store.json
+# Local operating data (your real business data stays out of git by default).
+# Covers store.json plus the .bak.json backup and .tmp file that save() writes.
+data/store*.json
 data/*.local.json
 data/exports/
 *.html
