@@ -1,0 +1,6 @@
+Name,Email,Financial Status,Paid at,Fulfillment Status,Fulfilled at,Currency,Subtotal,Shipping,Taxes,Total,Created at,Lineitem quantity,Lineitem name,Lineitem price,Lineitem sku,Shipping Country,Tracking Number
+#2001,ana@example.com,paid,2026-09-02 10:14:00 +0000,fulfilled,2026-09-03 09:00:00 +0000,USD,44.99,0.00,0.00,44.99,2026-09-02 10:14:00 +0000,1,Posture Corrector Pro,44.99,PCP-01,US,LP4400901CN
+#2002,ben@example.com,paid,2026-09-04 08:02:00 +0000,unfulfilled,,USD,44.99,0.00,0.00,44.99,2026-09-04 08:02:00 +0000,1,Posture Corrector Pro,44.99,PCP-01,GB,
+#2003,cara@example.com,refunded,2026-09-05 16:41:00 +0000,fulfilled,2026-09-06 11:20:00 +0000,USD,34.99,0.00,0.00,34.99,2026-09-05 16:41:00 +0000,1,LED Sunset Lamp,34.99,LSL-03,US,LP4400903CN
+#2004,dev@example.com,paid,2026-09-08 12:00:00 +0000,fulfilled,2026-09-09 10:00:00 +0000,USD,29.99,0.00,0.00,29.99,2026-09-08 12:00:00 +0000,1,Magnetic Cable Organiser,29.99,MCO-02,CA,LP4400904CN
+#2004,,,,,,,,,,,,,1,Free Sticker Pack,0.00,STK-99,,
