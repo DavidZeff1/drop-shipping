@@ -126,6 +126,7 @@ kpi            blended performance with threshold-aware alerts
 dashboard      offline single-file HTML
 ui             a basic web interface on this machine
 storefront     a shop page you can put online
+site           the whole shop as a folder you can upload
 config         show / set
 ```
 
@@ -147,15 +148,25 @@ It listens on this machine only and has no login. Do not expose the port.
 ## Somewhere to send the traffic
 
 ```bash
-python3 -m dropship storefront "Pet Hair" \
-  --image shot1.jpg --image shot2.jpg \
-  --pay https://buy.stripe.com/your_link
+python3 -m dropship site
 ```
 
-Writes one self-contained HTML file: photos, price, the listing copy, the
-delivery estimate, policies, and a buy button that opens your own payment
-link. Upload it to any static host. No build step, no framework, no monthly
-fee.
+Writes the whole shop into `site/`: a home page, a page for each product you
+are actually selling, the policy pages a payment provider reads before it
+approves an account, and a thank-you page for after payment. Upload the folder
+to any static host. No build step, no framework, no monthly fee.
+
+Next to it, `site.notes.md` says how to publish it, what is still unfilled,
+and which six emails are worth setting up.
+
+One product at a time, with its photos and payment link:
+
+```bash
+python3 -m dropship storefront "Pet Hair" \
+  --image shot1.jpg --image shot2.jpg \
+  --pay https://buy.stripe.com/your_link \
+  --bundle-price 69.98 --bundle-pay https://buy.stripe.com/your_two_pack
+```
 
 Money never passes through the file. The processor's page takes the card,
 which keeps the compliance burden theirs, and their CSV export comes back in
@@ -186,6 +197,8 @@ The tool makes the decisions; these explain the judgement behind them.
 
 - **[Start here](playbooks/00-start-here.md)** — an honest assessment, and a
   three-week launch plan
+- [Launch checklist](playbooks/launch-checklist.md) — the accounts, samples and
+  answers only you can supply, in the order that costs least
 - [Daily rhythm](playbooks/daily-rhythm.md) — the 20-minute morning loop
 - [Product research](playbooks/product-research.md) — the gates, the score,
   and where to actually look
@@ -214,7 +227,7 @@ python3 -m dropship --store ~/stores/uk.json today
 python3 -m unittest discover -s tests -t .
 ```
 
-160 tests, no dependencies. Weighted toward the statistics and economics,
+168 tests, no dependencies. Weighted toward the statistics and economics,
 where a silent error would poison every decision downstream.
 
 ## Honest limitations

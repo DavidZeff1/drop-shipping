@@ -578,13 +578,16 @@ def _shop_card(product: Product, here: str) -> str:
             f'{_input("Payment link", "pay_url", product.pay_url, kind="text", hint="Stripe or PayPal link for this product; https only")}'
             f'{_input("The problem", "copy_problem", product.copy_problem, kind="text", hint="a noun phrase: pet hair on every cushion")}'
             f'{_input("The outcome", "copy_outcome", product.copy_outcome, kind="text", hint="a fur-free sofa in one pass")}'
+            f'{_input("Bundle price", "bundle_price", _plain(product.bundle_price), hint="two of them, at a price for two")}'
+            f'{_input("Bundle payment link", "bundle_pay_url", product.bundle_pay_url, kind="text", hint="its own link, charging the bundle price")}'
             "</div>"
             '<div class="actions"><button class="ghost">Save</button></div></form>'
             f'<p class="hint">{_e(photos)}. Photos are files, so they go in from '
             f"the terminal: <code>{_e(command)}</code></p>"
             f'<div class="actions">{_link(_url("/shop", id=product.id), "Preview the shop page")}'
-            f'<span class="hint">Write the file: <code>dropship storefront '
-            f'"{_e(product.name)}"</code></span></div></div>')
+            f'<span class="hint">Write this page: <code>dropship storefront '
+            f'"{_e(product.name)}"</code> &nbsp; The whole shop, with policy '
+            f"pages: <code>dropship site</code></span></div></div>")
 
 
 def _economics_card(product: Product, ue: UnitEconomics, config: Config) -> str:
@@ -1152,7 +1155,13 @@ def act_save_shop(store: Store, form: dict[str, str]) -> Response:
         raise _Invalid("A payment link must start with https:// - nobody should "
                        "type card details on an unencrypted page, and the browser "
                        "will say so on yours.")
+    bundle = _text(form, "bundle_pay_url")
+    if bundle and not bundle.startswith("https://"):
+        raise _Invalid("The bundle's payment link must start with https:// too.")
     product.pay_url = url
+    product.bundle_pay_url = bundle
+    product.bundle_price = _number(form, "bundle_price", "Bundle price",
+                                   product.bundle_price)
     product.copy_problem = _text(form, "copy_problem")
     product.copy_outcome = _text(form, "copy_outcome")
     product.updated = today_iso()

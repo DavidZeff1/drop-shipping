@@ -134,6 +134,8 @@ class Product(Record):
     photos: list[str] = field(default_factory=list)   # image paths or URLs
     copy_problem: str = ""          # the annoyance, in the customer's words
     copy_outcome: str = ""          # what they get, in the customer's words
+    bundle_price: float = 0.0       # two of them, at a price for two
+    bundle_pay_url: str = ""        # the bundle's own payment link
 
     # Live state
     status: str = "candidate"

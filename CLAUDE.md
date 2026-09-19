@@ -33,7 +33,7 @@ plus written playbooks (`playbooks/`).
 | `importers.py` | CSV import with fuzzy column matching |
 | `dashboard.py` | Offline single-file HTML |
 | `ui.py` | Local web interface on `http.server`: pages and forms over the engine |
-| `storefront.py` | The customer-facing shop page: one self-contained HTML file |
+| `storefront.py` | Customer-facing pages: one product page, or the whole shop |
 | `cli.py` | Argparse entry point |
 | `demo.py` | Seed data |
 
@@ -93,6 +93,11 @@ of the system and they are not stylistic:
   operator's own payment link, and orders return via `import orders`.
 - Light mode only, unlike the dashboard: photos shot on white do not survive an
   inverted palette.
+- The policy pages are mostly slots on purpose. They are answers only the
+  operator has, and an invented refund policy is worse than none: it is the
+  document a bank reads in a dispute.
+- `build_site` only shows products in `SELLING`. A killed or unscored product
+  has no business in a shop window.
 
 ## Tone
 

@@ -947,7 +947,9 @@ def cmd_storefront(args) -> None:
     changed = False
     for value, attr in ((args.image, "photos"), (args.pay, "pay_url"),
                         (args.problem, "copy_problem"),
-                        (args.outcome, "copy_outcome")):
+                        (args.outcome, "copy_outcome"),
+                        (args.bundle_price, "bundle_price"),
+                        (args.bundle_pay, "bundle_pay_url")):
         if value is not None:
             setattr(product, attr, list(value) if attr == "photos" else value)
             changed = True
@@ -975,6 +977,30 @@ def cmd_storefront(args) -> None:
         f"Orders land in your payment provider, not here. Export their CSV and "
         f"run: dropship import orders <file>",
     ], ">")
+
+
+def cmd_site(args) -> None:
+    store = load(args)
+    site = storefront.build_site(store.products, store.config)
+    out = Path(args.out)
+    written = storefront.write_site(site, out)
+    notes_path = out.parent / f"{out.name}.notes.md"
+    notes_path.write_text(storefront.notes(site, store.config, out),
+                          encoding="utf-8")
+
+    print(f"Wrote {c(str(out.resolve()), BOLD)} - {len(written)} files, "
+          f"{site.size / 1000:,.0f} KB, nothing to install")
+    table(["File", "Slots to fill"],
+          [[name, str(site.slots.get(name, 0))] for name in site.files],
+          right={1})
+    print(f"\nHow to publish it, and the emails to set up: "
+          f"{c(str(notes_path.resolve()), BOLD)}")
+
+    if site.issues:
+        header(f"Before it goes live ({len(site.issues)})")
+        bullets(site.issues, c("x", RED))
+    else:
+        print(c("\n  Nothing outstanding. Upload the folder.", GREEN))
 
 
 def cmd_ui(args) -> None:
@@ -1258,8 +1284,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--problem", help="the annoyance, as a noun phrase: "
                                      "'pet hair on every cushion'")
     s.add_argument("--outcome", help="what they get: 'a fur-free sofa in one pass'")
+    s.add_argument("--bundle-price", type=float,
+                   help="price for two; raises AOV, the cheapest lever on ROAS")
+    s.add_argument("--bundle-pay", help="the bundle's own payment link")
     s.add_argument("--out", help="default: shop-<sku>.html")
     s.set_defaults(func=cmd_storefront)
+
+    s = sub.add_parser("site", help="the whole shop as a folder you can upload")
+    s.add_argument("--out", default="site", help="folder to write (default: site)")
+    s.set_defaults(func=cmd_site)
 
     s = sub.add_parser("ui", help="a basic web interface on this machine")
     s.add_argument("--port", type=int, default=8765)

@@ -6,6 +6,10 @@ data/exports/
 *.html
 !playbooks/*.html
 
+# Generated shop: the folder you upload, and the notes that come with it
+site/
+*.notes.md
+
 # Python
 __pycache__/
 *.py[cod]

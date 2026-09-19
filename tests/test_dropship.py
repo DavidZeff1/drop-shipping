@@ -1047,6 +1047,15 @@ class TestCLI(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.cli("econ", "does-not-exist")
 
+    def test_site_writes_a_folder_and_its_notes(self):
+        out = Path(self.tmp.name) / "site"
+        output = self.cli("site", "--out", str(out))
+        self.assertIn("index.html", output)
+        self.assertTrue((out / "index.html").is_file())
+        self.assertTrue((out / "refunds.html").is_file())
+        notes = out.parent / "site.notes.md"
+        self.assertIn("Netlify", notes.read_text(encoding="utf-8"))
+
     def test_storefront_writes_a_shop_page(self):
         out_path = Path(self.tmp.name) / "shop.html"
         out = self.cli("storefront", "Pet Hair", "--out", str(out_path),
@@ -1172,6 +1181,76 @@ class TestStorefront(unittest.TestCase):
         self.assertNotIn("<script>alert(1)</script>", page.html)
         self.assertIn("&lt;script&gt;", page.html)
 
+    def test_bundle_needs_a_price_and_its_own_link(self):
+        self.product.bundle_price = 69.98
+        page = storefront.build(self.product, self.cfg)
+        self.assertTrue(any("needs both" in i for i in page.issues))
+
+        self.product.bundle_pay_url = "https://buy.stripe.com/two"
+        page = storefront.build(self.product, self.cfg)
+        self.assertIn("Buy two", page.html)
+        self.assertIn("69.98", page.html)
+        self.assertFalse(any("needs both" in i for i in page.issues))
+
+    def test_a_bundle_that_is_not_cheaper_is_called_out(self):
+        self.product.bundle_price = self.product.price * 2
+        self.product.bundle_pay_url = "https://buy.stripe.com/two"
+        page = storefront.build(self.product, self.cfg)
+        self.assertTrue(any("not cheaper" in i for i in page.issues))
+
+    def test_site_has_a_page_per_product_plus_the_ones_a_processor_wants(self):
+        selling = Product(name="Seller", sku="S-1", price=49.99, cogs=8.0,
+                          ship_cost=2.0, status="scaling",
+                          pay_url="https://buy.stripe.com/x")
+        killed = Product(name="Dead", sku="D-1", price=49.99, cogs=8.0,
+                         status="killed")
+        site = storefront.build_site([selling, killed], self.cfg)
+
+        self.assertIn("s-1.html", site.files)
+        self.assertNotIn("d-1.html", site.files)         # killed is not a shop window
+        for required in ("index.html", "thanks.html", "refunds.html",
+                         "shipping.html", "privacy.html", "terms.html",
+                         "contact.html"):
+            self.assertIn(required, site.files)
+        self.assertIn("Seller", site.files["index.html"])
+        self.assertIn("s-1.html", site.files["index.html"])   # home links to it
+        self.assertIn("refunds.html", site.files["s-1.html"])  # and it links back
+
+    def test_every_page_of_the_site_is_complete_html(self):
+        product = Product(name="Seller", sku="S-1", price=49.99, cogs=8.0,
+                          ship_cost=2.0, status="scaling")
+        site = storefront.build_site([product], self.cfg)
+        for name, page in site.files.items():
+            self.assertTrue(page.startswith("<!doctype html>"), name)
+            self.assertIn("</html>", page, name)
+            self.assertNotIn("<script", page, name)
+            self.assertGreater(site.slots[name], -1, name)
+
+    def test_site_slots_exclude_the_stylesheet(self):
+        product = Product(name="Seller", sku="S-1", price=49.99, cogs=8.0,
+                          ship_cost=2.0, status="scaling")
+        site = storefront.build_site([product], self.cfg)
+        # The CSS alone has dozens of brace pairs; policy pages have a handful.
+        self.assertLess(site.slots["privacy.html"], 20)
+        self.assertGreater(site.slots["privacy.html"], 0)
+
+    def test_an_empty_shop_window_says_so(self):
+        site = storefront.build_site([Product(name="Dead", status="killed")],
+                                     self.cfg)
+        self.assertEqual(site.products, [])
+        self.assertTrue(any("shop window" in i for i in site.issues))
+
+    def test_notes_explain_publishing_and_never_leak_into_the_site(self):
+        product = Product(name="Seller", sku="S-1", price=49.99, cogs=8.0,
+                          ship_cost=2.0, status="scaling")
+        site = storefront.build_site([product], self.cfg)
+        written = storefront.write_site(site, self.dir / "site")
+        self.assertEqual({p.name for p in written}, set(site.files))
+        text = storefront.notes(site, self.cfg, self.dir / "site")
+        for expected in ("Payment links", "import orders", "thanks.html",
+                         "Abandoned checkout"):
+            self.assertIn(expected, text)
+
     def test_write_puts_one_file_on_disk(self):
         page = storefront.build(self.product, self.cfg)
         path = storefront.write(page, self.dir / storefront.default_path(self.product))
@@ -1229,9 +1308,12 @@ class TestUI(unittest.TestCase):
         self.assertEqual(self.reload().product(pet.id).pay_url, "")
         self.submit("/product/shop", id=pet.id, pay_url="https://buy.stripe.com/t_1",
                     copy_problem="pet hair on every cushion",
-                    copy_outcome="a fur-free sofa in one pass")
+                    copy_outcome="a fur-free sofa in one pass",
+                    bundle_price="69.98",
+                    bundle_pay_url="https://buy.stripe.com/t_2")
         saved = self.reload().product(pet.id)
         self.assertEqual(saved.pay_url, "https://buy.stripe.com/t_1")
+        self.assertAlmostEqual(saved.bundle_price, 69.98)
         # The preview says what the written file will say.
         preview = self.page("/shop", id=pet.id)
         self.assertIn("buy.stripe.com", preview)
