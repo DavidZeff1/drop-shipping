@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from dropship import (
     cashflow, cli, dashboard, daily, importers, kpis, listings, ops,
-    research, stats, testing, ui,
+    research, stats, storefront, testing, ui,
 )
 from dropship import suppliers as sup_mod
 from dropship.demo import seed
@@ -1047,10 +1047,136 @@ class TestCLI(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.cli("econ", "does-not-exist")
 
+    def test_storefront_writes_a_shop_page(self):
+        out_path = Path(self.tmp.name) / "shop.html"
+        out = self.cli("storefront", "Pet Hair", "--out", str(out_path),
+                       "--pay", "https://buy.stripe.com/test_1")
+        self.assertIn("BEFORE YOU PUBLISH", out)
+        self.assertIn("</html>", out_path.read_text(encoding="utf-8"))
+        self.assertEqual(Store.load(self.store_path).product("Pet Hair").pay_url,
+                         "https://buy.stripe.com/test_1")
+
     def test_ui_command_is_registered(self):
         args = cli.build_parser().parse_args(["ui", "--port", "0", "--no-browser"])
         self.assertIs(args.func, cli.cmd_ui)
         self.assertTrue(args.no_browser)
+
+
+# ------------------------------------------------------------- storefront --
+
+class TestStorefront(unittest.TestCase):
+    """The shop page is customer-facing: it must be honest and publishable."""
+
+    def setUp(self):
+        self.cfg = base_config()
+        self.product = Product(name="Pet Hair Remover Roller", sku="PHR-05",
+                               price=39.99, cogs=7.10, ship_cost=2.90,
+                               delivery_days=11)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def photo(self, name: str, size: tuple[int, int] = (8, 8),
+              noise: bool = False) -> Path:
+        """A real PNG, written with the standard library.
+
+        ``noise`` makes it incompressible, which is the only way to get a test
+        file over the size limit - a flat colour shrinks to nothing.
+        """
+        import os
+        import struct
+        import zlib
+        width, height = size
+        row = (lambda: os.urandom(width * 3)) if noise else \
+            (lambda: bytes((200, 190, 180)) * width)
+        raw = b"".join(b"\x00" + row() for _ in range(height))
+
+        def chunk(tag: bytes, data: bytes) -> bytes:
+            return (struct.pack(">I", len(data)) + tag + data
+                    + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+        path = self.dir / name
+        path.write_bytes(b"\x89PNG\r\n\x1a\n"
+                         + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height,
+                                                      8, 2, 0, 0, 0))
+                         + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+        return path
+
+    def test_page_is_self_contained_and_honest(self):
+        page = storefront.build(self.product, self.cfg)
+        self.assertIn("</html>", page.html)
+        self.assertNotIn("<script", page.html)          # nothing to execute
+        self.assertNotIn("http://", page.html)          # nothing to fetch
+        self.assertIn("39.99", page.html)
+        self.assertIn("11 days", page.html)             # the promise, before checkout
+        self.assertIn("Delivery, returns and contact", page.html)
+
+    def test_an_empty_page_lists_what_it_needs(self):
+        page = storefront.build(self.product, self.cfg)
+        self.assertFalse(page.publishable)
+        joined = " ".join(page.issues)
+        self.assertIn("No photos", joined)
+        self.assertIn("No payment link", joined)
+        self.assertGreater(page.slots, 0)
+        self.assertIn("--image", joined)                 # every problem, its fix
+        self.assertIn("--pay", joined)
+
+    def test_slots_are_counted_from_the_copy_not_the_stylesheet(self):
+        """The stylesheet is full of braces; none of them is an unfilled slot."""
+        page = storefront.build(self.product, self.cfg)
+        self.assertLess(page.slots, 60)
+        self.assertIn('<mark class="slot">', page.html)
+        filled = storefront.build(self.product, self.cfg, problem="pet hair",
+                                  outcome="a fur-free sofa")
+        self.assertLess(filled.slots, page.slots)
+
+    def test_photos_are_embedded_and_oversized_ones_are_flagged(self):
+        small = self.photo("small.png")
+        self.product.photos = [str(small)]
+        page = storefront.build(self.product, self.cfg)
+        self.assertIn("data:image/png;base64,", page.html)
+        self.assertFalse(any("No photos" in i for i in page.issues))
+
+        self.product.photos = [str(self.photo("huge.png", (700, 700), noise=True))]
+        page = storefront.build(self.product, self.cfg)
+        self.assertTrue(any("Compress" in i for i in page.issues))
+
+    def test_a_missing_photo_is_reported_not_crashed_on(self):
+        self.product.photos = [str(self.dir / "nope.png")]
+        page = storefront.build(self.product, self.cfg)
+        self.assertIn("</html>", page.html)
+        self.assertTrue(any("not found" in i for i in page.issues))
+
+    def test_the_buy_button_opens_the_payment_link(self):
+        self.product.pay_url = "https://buy.stripe.com/test_123"
+        page = storefront.build(self.product, self.cfg)
+        self.assertIn('href="https://buy.stripe.com/test_123"', page.html)
+        self.assertIn("Stripe", page.html)               # names the checkout
+        self.assertFalse(any("payment link" in i for i in page.issues))
+
+    def test_an_unencrypted_payment_link_is_refused_politely(self):
+        self.product.pay_url = "http://buy.example.com/x"
+        page = storefront.build(self.product, self.cfg)
+        self.assertTrue(any("not https" in i for i in page.issues))
+
+    def test_a_product_that_fails_its_gates_says_so(self):
+        thin = Product(name="Thin", price=15.0, cogs=8.0, ship_cost=2.0)
+        page = storefront.build(thin, self.cfg)
+        self.assertTrue(any("research gate" in i for i in page.issues))
+
+    def test_customer_text_is_escaped(self):
+        self.product.name = "<script>alert(1)</script>"
+        page = storefront.build(self.product, self.cfg)
+        self.assertNotIn("<script>alert(1)</script>", page.html)
+        self.assertIn("&lt;script&gt;", page.html)
+
+    def test_write_puts_one_file_on_disk(self):
+        page = storefront.build(self.product, self.cfg)
+        path = storefront.write(page, self.dir / storefront.default_path(self.product))
+        self.assertEqual(path.name, "shop-phr-05.html")
+        self.assertIn("</html>", path.read_text(encoding="utf-8"))
 
 
 # ---------------------------------------------------------------------- ui --
@@ -1084,10 +1210,32 @@ class TestUI(unittest.TestCase):
 
     def test_every_page_renders(self):
         for path in ui.PAGES:
-            if path != "/product":
+            if path not in ("/product", "/shop"):
                 self.assertIn("</html>", self.page(path))
         for product in self.reload().products:
             self.assertIn(product.name, self.page("/product", id=product.id))
+            self.assertIn("</html>", self.page("/shop", id=product.id))
+
+    def test_shop_preview_is_marked_as_one(self):
+        pet = self.reload().product("Pet Hair")
+        html = self.page("/shop", id=pet.id)
+        self.assertIn("Preview.", html)              # the bar the file will not have
+        self.assertIn("No payment link", html)       # and what it still needs
+
+    def test_payment_link_must_be_encrypted(self):
+        pet = self.reload().product("Pet Hair")
+        self.assertIn("err", self.submit("/product/shop", id=pet.id,
+                                         pay_url="http://buy.example.com/x"))
+        self.assertEqual(self.reload().product(pet.id).pay_url, "")
+        self.submit("/product/shop", id=pet.id, pay_url="https://buy.stripe.com/t_1",
+                    copy_problem="pet hair on every cushion",
+                    copy_outcome="a fur-free sofa in one pass")
+        saved = self.reload().product(pet.id)
+        self.assertEqual(saved.pay_url, "https://buy.stripe.com/t_1")
+        # The preview says what the written file will say.
+        preview = self.page("/shop", id=pet.id)
+        self.assertIn("buy.stripe.com", preview)
+        self.assertIn("a fur-free sofa in one pass", preview)
 
     def test_today_links_each_item_to_the_page_that_fixes_it(self):
         lamp = self.reload().product("LED")

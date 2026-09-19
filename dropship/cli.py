@@ -16,7 +16,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from . import cashflow, dashboard, daily, importers, kpis, listings, ops
+from . import cashflow, dashboard, daily, importers, kpis, listings, ops, storefront
 from . import research, suppliers as sup_mod, testing
 from .economics import UnitEconomics, for_product
 from .models import AdTest, Config, LedgerEntry, Order, Product, Supplier, today_iso
@@ -940,6 +940,43 @@ def cmd_dashboard(args) -> None:
     print(c("  Open it in a browser. Works offline, no dependencies.", DIM))
 
 
+def cmd_storefront(args) -> None:
+    store = load(args)
+    product = need_product(store, args.product)
+    # Flags stick to the product, so the next run and the UI preview agree.
+    changed = False
+    for value, attr in ((args.image, "photos"), (args.pay, "pay_url"),
+                        (args.problem, "copy_problem"),
+                        (args.outcome, "copy_outcome")):
+        if value is not None:
+            setattr(product, attr, list(value) if attr == "photos" else value)
+            changed = True
+    if changed:
+        product.updated = today_iso()
+        store.save()
+
+    page = storefront.build(product, store.config)
+    path = storefront.write(page, args.out or storefront.default_path(product))
+    print(f"Wrote {c(str(path.resolve()), BOLD)} ({page.size / 1000:,.0f} KB, "
+          f"one file, no dependencies)")
+
+    if page.issues:
+        header(f"Before you publish it ({len(page.issues)})")
+        bullets(page.issues, c("x", RED))
+    else:
+        print(c("  Nothing outstanding. Upload it to any static host.", GREEN))
+
+    header("Then")
+    bullets([
+        "Open it on your phone, on mobile data, and time it. Over 2.5 seconds "
+        "and you are paying for clicks that leave before the page draws.",
+        "Add real reviews with photos before you spend on traffic. Never invent "
+        "them - it is illegal and it is the first thing a bank checks.",
+        f"Orders land in your payment provider, not here. Export their CSV and "
+        f"run: dropship import orders <file>",
+    ], ">")
+
+
 def cmd_ui(args) -> None:
     from .ui import serve
     serve(args.store, args.port, open_browser=not args.no_browser)
@@ -1211,6 +1248,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--out", default="dashboard.html")
     s.add_argument("--days", type=int, default=90)
     s.set_defaults(func=cmd_dashboard)
+
+    s = sub.add_parser("storefront", help="a shop page you can put online")
+    s.add_argument("product")
+    s.add_argument("--image", action="append",
+                   help="photo file or URL, repeatable; saved on the product")
+    s.add_argument("--pay", help="payment link the buy button opens "
+                                 "(Stripe, PayPal, anything)")
+    s.add_argument("--problem", help="the annoyance, as a noun phrase: "
+                                     "'pet hair on every cushion'")
+    s.add_argument("--outcome", help="what they get: 'a fur-free sofa in one pass'")
+    s.add_argument("--out", help="default: shop-<sku>.html")
+    s.set_defaults(func=cmd_storefront)
 
     s = sub.add_parser("ui", help="a basic web interface on this machine")
     s.add_argument("--port", type=int, default=8765)

@@ -27,10 +27,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from . import cashflow, daily, dashboard, ops, research, testing
+from . import cashflow, daily, dashboard, ops, research, storefront, testing
 from .demo import seed
 from .economics import UnitEconomics, for_product
-from .models import ORDER_STATES, AdTest, Config, Order, Product
+from .models import ORDER_STATES, AdTest, Config, Order, Product, today_iso
 from .store import Store
 
 DEFAULT_PORT = 8765
@@ -556,8 +556,35 @@ def page_product(store: Store, query: dict[str, str]) -> str | Response:
             f"{_economics_card(product, ue, config)}"
             f"{_research_card(product, result, config, here)}</div>"
             f"<h2>Test</h2>{_test_section(store, product, ue, result, here)}"
+            f"<h2>Shop page</h2>{_shop_card(product, here)}"
             f"{delete}")
     return _layout(store, product.name, body, "/products", query)
+
+
+def _shop_card(product: Product, here: str) -> str:
+    """The customer-facing page: where it points, and what it still needs."""
+    photos = (f"{len(product.photos)} photo(s) on file"
+              if product.photos else "No photos yet")
+    command = (f'dropship storefront "{product.name}" '
+               f"--image shot1.jpg --image shot2.jpg")
+    return ('<div class="card">'
+            "<p>One self-contained HTML file: photos, price, the listing copy, "
+            "policies and a buy button that opens your payment link. Put it on "
+            "any static host. The payment page stays with your processor, so "
+            "card details never touch it.</p>"
+            '<form method="post" action="/product/shop">'
+            f'{_hidden("id", product.id)}{_hidden("back", here)}'
+            '<div class="fields">'
+            f'{_input("Payment link", "pay_url", product.pay_url, kind="text", hint="Stripe or PayPal link for this product; https only")}'
+            f'{_input("The problem", "copy_problem", product.copy_problem, kind="text", hint="a noun phrase: pet hair on every cushion")}'
+            f'{_input("The outcome", "copy_outcome", product.copy_outcome, kind="text", hint="a fur-free sofa in one pass")}'
+            "</div>"
+            '<div class="actions"><button class="ghost">Save</button></div></form>'
+            f'<p class="hint">{_e(photos)}. Photos are files, so they go in from '
+            f"the terminal: <code>{_e(command)}</code></p>"
+            f'<div class="actions">{_link(_url("/shop", id=product.id), "Preview the shop page")}'
+            f'<span class="hint">Write the file: <code>dropship storefront '
+            f'"{_e(product.name)}"</code></span></div></div>')
 
 
 def _economics_card(product: Product, ue: UnitEconomics, config: Config) -> str:
@@ -978,6 +1005,25 @@ def page_settings(store: Store, query: dict[str, str]) -> str:
     return _layout(store, "Settings", body, "/settings", query)
 
 
+def page_shop(store: Store, query: dict[str, str]) -> str | Response:
+    """The customer-facing page as it will look, with a bar the file will not have."""
+    product = store.product(query.get("id", ""))
+    if product is None:
+        return _not_found(store, "No such product. It may have been deleted.")
+    page = storefront.build(product, store.config)
+    issues = "".join(f"<li>{_e(issue)}</li>" for issue in page.issues)
+    back = _url("/product", id=product.id)
+    banner = (
+        '<div style="background:#fab219;color:#0b0b0b;padding:10px 16px;'
+        'font:13.5px/1.5 system-ui,-apple-system,sans-serif">'
+        f'<b>Preview.</b> This bar is not in the file. <a href="{_e(back)}" '
+        'style="color:inherit">Back to the product</a>'
+        + (f'<ul style="margin:6px 0 0;padding-left:20px">{issues}</ul>'
+           if issues else " Nothing left to fix.")
+        + "</div>")
+    return page.html.replace("<body>", "<body>" + banner, 1)
+
+
 def page_dashboard(store: Store, query: dict[str, str]) -> str:
     return dashboard.render(store).replace(
         '<div class="wrap">',
@@ -1099,6 +1145,23 @@ def act_rescore(store: Store, form: dict[str, str]) -> Response:
         f"Status: {product.status}.")))
 
 
+def act_save_shop(store: Store, form: dict[str, str]) -> Response:
+    product = _product_from(store, form)
+    url = _text(form, "pay_url")
+    if url and not url.startswith("https://"):
+        raise _Invalid("A payment link must start with https:// - nobody should "
+                       "type card details on an unencrypted page, and the browser "
+                       "will say so on yours.")
+    product.pay_url = url
+    product.copy_problem = _text(form, "copy_problem")
+    product.copy_outcome = _text(form, "copy_outcome")
+    product.updated = today_iso()
+    store.save()
+    return _redirect(_url("/product", id=product.id, msg=(
+        f"Shop page saved. Buy button opens {url}" if url
+        else "Shop page saved. It still has no payment link.")))
+
+
 def act_delete_product(store: Store, form: dict[str, str]) -> Response:
     product = _product_from(store, form)
     store.remove(product)
@@ -1166,12 +1229,13 @@ def act_load_demo(store: Store, form: dict[str, str]) -> Response:
 
 PAGES = {"/": page_today, "/products": page_products, "/product": page_product,
          "/orders": page_orders, "/settings": page_settings,
-         "/dashboard": page_dashboard}
+         "/dashboard": page_dashboard, "/shop": page_shop}
 ACTIONS = {"/products/add": act_add_product, "/product/start": act_start_test,
            "/product/test": act_record_results, "/product/decide": act_decide,
-           "/product/score": act_rescore, "/product/delete": act_delete_product,
-           "/orders/update": act_update_order, "/orders/review": act_review_sent,
-           "/settings": act_save_settings, "/demo": act_load_demo}
+           "/product/score": act_rescore, "/product/shop": act_save_shop,
+           "/product/delete": act_delete_product, "/orders/update": act_update_order,
+           "/orders/review": act_review_sent, "/settings": act_save_settings,
+           "/demo": act_load_demo}
 
 
 # ---------------------------------------------------------------- server --

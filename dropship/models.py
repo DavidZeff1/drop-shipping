@@ -129,6 +129,12 @@ class Product(Record):
     delivery_days: float = 14.0     # promised door-to-door
     local_stock: bool = False       # domestic warehouse available?
 
+    # Storefront: what the shop page needs and no calculation uses
+    pay_url: str = ""               # payment link the buy button opens
+    photos: list[str] = field(default_factory=list)   # image paths or URLs
+    copy_problem: str = ""          # the annoyance, in the customer's words
+    copy_outcome: str = ""          # what they get, in the customer's words
+
     # Live state
     status: str = "candidate"
     score: float = 0.0

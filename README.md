@@ -125,6 +125,7 @@ import ads     Meta / TikTok / Google CSV export
 kpi            blended performance with threshold-aware alerts
 dashboard      offline single-file HTML
 ui             a basic web interface on this machine
+storefront     a shop page you can put online
 config         show / set
 ```
 
@@ -142,6 +143,29 @@ order queue, and the settings. It reads and writes the same store through the
 same engine as the CLI, so the two never disagree - use whichever is nearer.
 
 It listens on this machine only and has no login. Do not expose the port.
+
+## Somewhere to send the traffic
+
+```bash
+python3 -m dropship storefront "Pet Hair" \
+  --image shot1.jpg --image shot2.jpg \
+  --pay https://buy.stripe.com/your_link
+```
+
+Writes one self-contained HTML file: photos, price, the listing copy, the
+delivery estimate, policies, and a buy button that opens your own payment
+link. Upload it to any static host. No build step, no framework, no monthly
+fee.
+
+Money never passes through the file. The processor's page takes the card,
+which keeps the compliance burden theirs, and their CSV export comes back in
+through `import orders`.
+
+Every slot the copy leaves you stays visible and highlighted, and the command
+lists what is unfilled rather than letting you publish it. There is no
+invented review count, no fake scarcity and no countdown: they raise disputes
+faster than they raise conversion, and a fabricated review is the first thing
+a card network looks at.
 
 ## Bring your real data
 
@@ -190,7 +214,7 @@ python3 -m dropship --store ~/stores/uk.json today
 python3 -m unittest discover -s tests -t .
 ```
 
-147 tests, no dependencies. Weighted toward the statistics and economics,
+160 tests, no dependencies. Weighted toward the statistics and economics,
 where a silent error would poison every decision downstream.
 
 ## Honest limitations

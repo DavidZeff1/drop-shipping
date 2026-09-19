@@ -33,12 +33,13 @@ plus written playbooks (`playbooks/`).
 | `importers.py` | CSV import with fuzzy column matching |
 | `dashboard.py` | Offline single-file HTML |
 | `ui.py` | Local web interface on `http.server`: pages and forms over the engine |
+| `storefront.py` | The customer-facing shop page: one self-contained HTML file |
 | `cli.py` | Argparse entry point |
 | `demo.py` | Seed data |
 
 Dependency direction is one-way: `stats` → `economics` → everything else.
-`cli`, `ui` and `dashboard` sit on top: they import from the rest, and the rest
-never imports them.
+`cli`, `ui`, `dashboard` and `storefront` sit on top: they import from the rest,
+and the engine never imports them.
 
 State changes that both front ends make live in the engine, not in a command
 or a page handler: `research.apply_score`, `testing.apply_decision`,
@@ -75,6 +76,23 @@ with no login, and refuses requests whose `Host` or `Origin` is not its own —
 that is what stops any other web page from posting to it while it runs. Keep
 both checks. Every page reads the store fresh; every write loads, changes and
 saves under one lock.
+
+## Storefront
+
+The only output a customer ever sees, so the rules are different from the rest
+of the system and they are not stylistic:
+
+- No invented reviews, no fake scarcity, no countdown timers. They raise
+  disputes faster than they raise conversion, and a fabricated review is the
+  first thing a card network looks at.
+- Unfilled `{slots}` stay visible and highlighted, and `Page.issues` names each
+  one rather than letting a draft go live.
+- The delivery estimate, the returns policy and a contact address belong on the
+  page, not behind checkout. They are also the evidence in a chargeback.
+- Money never passes through the file: the buy button hands over to the
+  operator's own payment link, and orders return via `import orders`.
+- Light mode only, unlike the dashboard: photos shot on white do not survive an
+  inverted palette.
 
 ## Tone
 
