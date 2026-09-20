@@ -1,5 +1,8 @@
 # dropship
 
+**Launching your own business?** Start with the [current launch status and next steps](START-BUSINESS.md).
+The included Northbound Goods records are demonstration data, not real sales.
+
 A complete operating system for a dropshipping business: product research,
 unit economics, ad-test decisions, cash-flow planning, fulfilment, customer
 service and reporting — in one command-line tool with no dependencies.
