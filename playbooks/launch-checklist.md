@@ -1,7 +1,7 @@
 # Launch checklist
 
-Everything here is something only you can do: accounts in your name, a supplier
-who has your money, answers about your own business. The tool does the rest.
+These steps depend on real accounts, supplier evidence and facts about your
+business. The software can prepare and check pages; it cannot verify those facts.
 
 The order matters. It is arranged so that the cheapest way to find out you
 should stop comes first, and the first bill comes last.
@@ -36,7 +36,9 @@ updates.
 
 ## 3. The answers your shop pages need
 
-Every `{slot}` in the generated pages is one of these. Write them down once:
+Every `{slot}` in the generated pages is one of these. Save answers once in
+the private `<store>.content.json` file; use `site --content-template <file>`
+to create it without overwriting existing answers:
 
 - [ ] Returns window, and **who pays return postage**
 - [ ] How fast you answer support, and the address you answer from
@@ -50,7 +52,8 @@ charge, and what a payment provider reads before it approves you at all.
 
 ## 4. A payment provider
 
-- [ ] Stripe or PayPal account opened in your business name
+- [ ] An eligible payment account opened with the correct business details;
+      for this Israel-based launch, follow the [Israel plan](israel-launch.md)
 - [ ] Bank account connected, identity verified
 - [ ] **Ask what your payout delay is, and whether there is a rolling reserve**
 - [ ] One payment link per product, at the price your page shows
@@ -67,18 +70,23 @@ accounts are often 7 days, sometimes 21. Ask before you need to know.
 ## 5. The shop itself
 
 ```bash
-python3 -m dropship site
+python3 -m dropship --store data/store-launch.json site --check
+python3 -m dropship --store data/store-launch.json site --ready --out site-release
 ```
 
 - [ ] Photos in: three or more per product, under 300 KB each
-- [ ] Every `{slot}` replaced, in every file
+- [ ] Every `{slot}` answered in the private content file, then regenerated
 - [ ] Policy pages read like a person wrote them for this shop
 - [ ] Opened on your own phone, on mobile data, and it drew in under 2.5s
 - [ ] A domain bought and pointed at the host
-- [ ] A test purchase made with your own card, refunded afterwards
+- [ ] A sandbox purchase and refund completed using the provider's supported
+      test accounts; any necessary live payment is separately authorized
 
-That last one is not optional. It is the only way to know the link charges the
-right amount, the confirmation email arrives, and the thank-you page appears.
+Confirm the correct item, quantity, currency, total and delivery address; receipt,
+order record, refund and return URL must work. Check the exported fields before
+importing: a payment activity CSV is not necessarily a supported order export.
+The local app does not retain a full delivery address; use the verified provider
+order record for fulfillment. Visiting `thanks.html` alone proves no payment.
 
 ## 6. Only now, traffic
 

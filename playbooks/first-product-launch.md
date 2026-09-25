@@ -3,6 +3,10 @@
 Prepared 20 September 2026. Internal drafts. No messages sent, purchases made,
 subscriptions started, or customer claims published.
 
+Update 25 September: [public prices and margin screening](sourcing-decision.md)
+put both current leads on hold pending a better delivered quote. Use the inquiry
+below to obtain facts; do not order based on the original demo economics.
+
 ## Supplier leads to compare
 
 | Lead | Evidence | Still unknown |

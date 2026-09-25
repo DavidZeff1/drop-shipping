@@ -17,7 +17,7 @@ from datetime import date
 from pathlib import Path
 
 from . import cashflow, dashboard, daily, importers, kpis, listings, ops, storefront
-from . import research, suppliers as sup_mod, testing
+from . import research, shop_content, suppliers as sup_mod, testing
 from .economics import UnitEconomics, for_product
 from .models import AdTest, Config, LedgerEntry, Order, Product, Supplier, today_iso
 from .store import Store, DEFAULT_PATH
@@ -940,8 +940,29 @@ def cmd_dashboard(args) -> None:
     print(c("  Open it in a browser. Works offline, no dependencies.", DIM))
 
 
+def _shop_content(args, store: Store) -> shop_content.Content:
+    path = args.content or shop_content.default_path(store.path)
+    try:
+        return shop_content.Content.load(path, optional=args.content is None)
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+
+def _check_shop(args, issues: list[str]) -> bool:
+    """Validate before any output file or store record is changed."""
+    if args.check or args.ready:
+        if issues:
+            header(f"Shop checks failed ({len(issues)})")
+            bullets(issues, c("x", RED))
+            sys.exit(1)
+        print("Technical shop checks passed. Verify the actual offer, policies, "
+              "payment and fulfillment before opening for orders.")
+    return args.check
+
+
 def cmd_storefront(args) -> None:
     store = load(args)
+    content = _shop_content(args, store)
     product = need_product(store, args.product)
     # Flags stick to the product, so the next run and the UI preview agree.
     changed = False
@@ -953,11 +974,13 @@ def cmd_storefront(args) -> None:
         if value is not None:
             setattr(product, attr, list(value) if attr == "photos" else value)
             changed = True
+    page = storefront.build(product, store.config, content=content)
+    if _check_shop(args, page.issues):
+        return
     if changed:
         product.updated = today_iso()
         store.save()
 
-    page = storefront.build(product, store.config)
     path = storefront.write(page, args.out or storefront.default_path(product))
     print(f"Wrote {c(str(path.resolve()), BOLD)} ({page.size / 1000:,.0f} KB, "
           f"one file, no dependencies)")
@@ -981,9 +1004,26 @@ def cmd_storefront(args) -> None:
 
 def cmd_site(args) -> None:
     store = load(args)
-    site = storefront.build_site(store.products, store.config)
+    content = _shop_content(args, store)
+    try:
+        if args.content_template:
+            empty_site = storefront.build_site([], store.config)
+            path = content.write_template(
+                args.content_template, list(empty_site.files.values()),
+                {p.id: storefront.build(p, store.config).html for p in store.products})
+            print(f"Created {path}. Fill verified answers; leave unknown values empty.")
+            print("Product sections use the IDs shown by dropship product list.")
+            return
+        site = storefront.build_site(store.products, store.config, content=content)
+    except (OSError, ValueError) as exc:
+        sys.exit(str(exc))
+    if _check_shop(args, site.issues):
+        return
     out = Path(args.out)
-    written = storefront.write_site(site, out)
+    try:
+        written = storefront.write_site(site, out)
+    except (OSError, ValueError) as exc:
+        sys.exit(str(exc))
     notes_path = out.parent / f"{out.name}.notes.md"
     notes_path.write_text(storefront.notes(site, store.config, out),
                           encoding="utf-8")
@@ -1288,10 +1328,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="price for two; raises AOV, the cheapest lever on ROAS")
     s.add_argument("--bundle-pay", help="the bundle's own payment link")
     s.add_argument("--out", help="default: shop-<sku>.html")
+    s.add_argument("--content", help="private JSON copy answers; default: <store>.content.json")
+    mode = s.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="validate without saving; exit 1 for issues")
+    mode.add_argument("--ready", action="store_true", help="write only if all technical checks pass")
     s.set_defaults(func=cmd_storefront)
 
     s = sub.add_parser("site", help="the whole shop as a folder you can upload")
     s.add_argument("--out", default="site", help="folder to write (default: site)")
+    s.add_argument("--content", help="private JSON copy answers; default: <store>.content.json")
+    mode = s.add_mutually_exclusive_group()
+    mode.add_argument("--content-template", metavar="FILE", help="create a reusable answer sheet; never overwrite")
+    mode.add_argument("--check", action="store_true", help="validate without writing; exit 1 for issues")
+    mode.add_argument("--ready", action="store_true", help="write only if all technical checks pass")
     s.set_defaults(func=cmd_site)
 
     s = sub.add_parser("ui", help="a basic web interface on this machine")

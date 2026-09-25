@@ -10,6 +10,7 @@ keep is a claim you are legally responsible for (see playbooks/compliance.md).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from .economics import UnitEconomics
@@ -137,7 +138,9 @@ def generate(product: Product, ue: UnitEconomics,
     name = product.name
     problem = problem or _placeholder("the problem it solves")
     outcome = outcome or _placeholder("the outcome the customer wants")
-    delivery = f"{product.delivery_days:.0f}"
+    delivery = (f"{product.delivery_days:.0f}"
+                if math.isfinite(product.delivery_days) and product.delivery_days > 0
+                else _placeholder("delivery estimate in days"))
 
     listing = Listing(product_name=name)
 

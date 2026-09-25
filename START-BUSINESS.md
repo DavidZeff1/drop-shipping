@@ -1,11 +1,58 @@
 # Your business launch
 
-Checked 20 September 2026. Status: preparation, not ready to accept orders.
+Checked 25 September 2026. Status: preparation, not ready to accept orders.
 
 Confirmed by you: **business location Israel; total startup limit US$5,000**.
 See the [Israel setup and staged budget](playbooks/israel-launch.md). You confirmed
-you have neither business registration nor a PayPal Business account. The first
-customer market is still undecided.
+you had neither business registration nor a PayPal Business account on
+20 September. An updated status and the first customer market are still needed.
+
+## Work completed on 25 September
+
+Continuation: [four alternative sourcing leads and two specific quote requests](playbooks/supplier-shortlist.md)
+are prepared, with cost ceilings for an Israel research case. Israel remains a
+provisional research market, not an owner-confirmed customer destination. The
+official Tax Authority application link was opened in Chrome and reached the
+sign-in screen; the next registration step requires the owner to sign in privately.
+No credentials were entered, messages sent, or payments made.
+
+- Checked the two supplier leads and competitor pricing. The roller stays at
+  research stage: current public item prices leave little room for shipping and
+  acquisition. Read the [sourcing decision and calculations](playbooks/sourcing-decision.md).
+- Created `data/store-launch.json` for actual onboarding, separate from the
+  original demo. It has one unverified candidate, no orders, no advertising tests,
+  no ledger entries and no funded cash recorded. The $5,000 limit is a spending
+  ceiling, not a bank balance. Zero costs/prices and other defaults are not quotes.
+- Created `data/store-launch.content.json`, a private answer sheet for copy and
+  policy facts. Answers now survive regeneration and appear in the UI preview.
+  Unknown answers remain blank; no product claims or business policies were invented.
+- Added read-only shop validation and checked export. Fixed invalid payment links,
+  ambiguous ILS prices, colliding filenames and leftover old product pages. Unknown
+  prices/delivery estimates remain unset in the preview. Removed
+  the empty reviews requirement and unverified payment confirmation.
+- Verified **194 tests pass**. No spending, supplier messages, business filings,
+  account creation or public deployment occurred.
+
+Open the working app with:
+
+```bash
+python3 -m dropship --store data/store-launch.json ui
+```
+
+Use that `--store` path for real onboarding. `data/store.json` and the existing
+`site/` remain the old demo. Both local stores and the answer sheet are ignored
+by git. Keep identity documents and credentials in the official services.
+
+After verified product information and policies are saved:
+
+```bash
+python3 -m dropship --store data/store-launch.json site --check
+python3 -m dropship --store data/store-launch.json site --ready --out site-release
+```
+
+The check currently fails as expected: the candidate is not approved and the
+business facts are incomplete. A passing check establishes technical completeness,
+not verified fulfillment, legal eligibility or a successful payment.
 
 ## What is already done
 
@@ -18,7 +65,7 @@ all 19 order emails end in `@example.com`, and the products and supplier sample
 notes match `dropship/demo.py`. Its sales, cash balance, advertising results,
 and sample delivery claims are not evidence of a real business.
 
-The five product records have no photos or payment links. The 11 generated
+The five original demo product records have no photos or payment links. The 11 generated
 shop pages contain 129 highlighted unfilled fields. No working checkout,
 verified supplier relationship, real sales, or public deployment was established
 in this audit. Existing files have been preserved.
@@ -41,12 +88,14 @@ The next owner step is the registration preparation described in the Israel
 plan. The first customer market still needs selection. Do not put passwords,
 card numbers or identity documents in this repository.
 
-## First product to investigate
+## First product investigated
 
 A reusable pet-hair roller for people cleaning fabric furniture. This is a
 research candidate, not a validated winner or a recommendation to buy stock.
 It has a specific problem and a demonstration that can be filmed with a sample.
 The price and demand scores in the demo must not be reused as verified inputs.
+The [25 September screening](playbooks/sourcing-decision.md) found that the two
+current leads need better delivered economics before a sample purchase is justified.
 
 [Prepared supplier request, listing draft and video scripts](playbooks/first-product-launch.md).
 
@@ -83,7 +132,22 @@ shipping address, product identification, confirmation page, refund workflow and
 order export. Test importing that export into a separate store before using real
 orders: payment reports are not necessarily fulfillment-ready order reports.
 
-## Next owner step
+## What is needed to continue
+
+1. First customer country and a representative delivery postcode for quotes.
+2. Current business-registration and payment-account status; give provider names,
+   not credentials. The official registration route requires your identity, bank
+   evidence and truthful income/turnover estimates, which are not available here.
+3. A supplier account for exact quotes, followed by the exact sample order details
+   and a real sample inspection. Public listings cannot replace either.
+4. Factual trading name, public contact details, returns arrangement and applicable
+   policies. Add licensed/original sample photos and a tested checkout link afterward.
+
+These are missing inputs and external verification steps, not software tasks.
+Customer-market selection and account/sample status were requested in this session;
+no answer was received during preparation. The staging budget remains unchanged.
+
+## Registration handoff
 
 Open the official registration instructions linked in the Israel plan and check
 eligibility. Sign in yourself if proceeding to the application. Review all real

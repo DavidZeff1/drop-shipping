@@ -180,8 +180,29 @@ Money never passes through the file. The processor's page takes the card,
 which keeps the compliance burden theirs, and their CSV export comes back in
 through `import orders`.
 
-Every slot the copy leaves you stays visible and highlighted, and the command
-lists what is unfilled rather than letting you publish it. There is no
+Save copy and policy answers once, beside your private store:
+
+```bash
+python3 -m dropship site --content-template data/store.content.json
+# Fill factual answers in that JSON file; leave unknowns empty.
+python3 -m dropship site --check
+python3 -m dropship site --ready --out site-release
+```
+
+The CLI and local UI automatically read `<store>.content.json`. It contains
+`shared` answers and `products` answers keyed by product ID; values are plain
+text. `--content <file>` chooses another file for a CLI build. The template
+includes candidate products so you can prepare them before approval. It refuses
+to overwrite existing answers. Keep this file outside the published folder.
+
+`--check` writes nothing and exits nonzero for outstanding issues. `--ready`
+refuses to write until technical checks pass. Ordinary `site` and `storefront`
+commands still write drafts. Checks cannot verify legal compliance, supplier
+claims, photo rights or an actual checkout transaction. Read the finished pages
+and test those separately. Use a fresh output folder if old product pages remain
+from another build; the exporter refuses to leave them accessible by accident.
+
+Every unresolved slot stays visible and highlighted. There is no
 invented review count, no fake scarcity and no countdown: they raise disputes
 faster than they raise conversion, and a fabricated review is the first thing
 a card network looks at.
@@ -235,7 +256,7 @@ python3 -m dropship --store ~/stores/uk.json today
 python3 -m unittest discover -s tests -t .
 ```
 
-176 tests, no dependencies. Weighted toward the statistics and economics,
+194 tests, no dependencies. Weighted toward the statistics and economics,
 where a silent error would poison every decision downstream.
 
 ## Honest limitations

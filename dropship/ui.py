@@ -1001,7 +1001,13 @@ def page_shop(store: Store, query: dict[str, str]) -> str | Response:
     product = store.product(query.get("id", ""))
     if product is None:
         return _not_found(store, "No such product. It may have been deleted.")
-    page = storefront.build(product, store.config)
+    from .shop_content import Content, default_path
+    try:
+        content = Content.load(default_path(store.path), optional=True)
+    except ValueError as exc:
+        return Response(400, _layout(store, "Shop content needs correction",
+                                     f"<p>{_e(exc)}</p>", "/products", query))
+    page = storefront.build(product, store.config, content=content)
     issues = "".join(f"<li>{_e(issue)}</li>" for issue in page.issues)
     back = _url("/product", id=product.id)
     banner = (

@@ -32,12 +32,14 @@ from __future__ import annotations
 
 import base64
 import html
+import math
 import mimetypes
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from . import listings, research
+from . import listings, research, shop_content
 from .economics import for_product
 from .models import Config, Product
 
@@ -153,8 +155,18 @@ def _e(text) -> str:
 
 
 def _money(value: float, config: Config) -> str:
-    sym = {"USD": "$", "GBP": "£", "EUR": "€"}.get(config.currency, "")
-    return f"{sym}{value:,.2f}"
+    sym = {"USD": "$", "GBP": "£", "EUR": "€", "ILS": "₪"}.get(config.currency)
+    return f"{sym}{value:,.2f}" if sym else f"{value:,.2f} {config.currency}"
+
+
+def _price(product: Product, config: Config) -> str:
+    return (_money(product.price, config)
+            if math.isfinite(product.price) and product.price > 0 else "Price not set")
+
+
+def _delivery(days: float) -> str:
+    return (f"{days:.0f}" if math.isfinite(days) and days > 0
+            else "{delivery estimate in days}")
 
 
 def _copy(text: str) -> str:
@@ -246,6 +258,16 @@ def _img(source: str, alt: str, issues: list[str]) -> str:
     return f'<img src="data:{kind};base64,{data}" alt="{label}" loading="lazy">'
 
 
+def _payment_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        return bool(parsed.scheme == "https" and parsed.hostname
+                    and not parsed.username and not parsed.password
+                    and not any(char.isspace() for char in url))
+    except ValueError:
+        return False
+
+
 def _buy(product: Product, config: Config, issues: list[str], sticky: bool = False) -> str:
     label = f"Buy now - {_money(product.price, config)}"
     if not product.pay_url:
@@ -255,11 +277,13 @@ def _buy(product: Product, config: Config, issues: list[str], sticky: bool = Fal
                 "payment link or a PayPal button for this product, then: dropship "
                 f"storefront \"{product.name}\" --pay https://...")
         return '<span class="buy off" aria-disabled="true">Payment link not set</span>'
-    if not product.pay_url.startswith("https://") and not sticky:
-        issues.append(
-            "The payment link is not https. Nobody should type card details on an "
-            "unencrypted page, and browsers say so loudly. Use the https link your "
-            "processor gives you.")
+    if not math.isfinite(product.price) or product.price <= 0:
+        return '<span class="buy off" aria-disabled="true">Price not set</span>'
+    if not _payment_url(product.pay_url):
+        if not sticky:
+            issues.append("The payment link is not https or has no valid host. "
+                          "Use the complete https link your processor gives you.")
+        return '<span class="buy off" aria-disabled="true">Payment link needs correction</span>'
     return f'<a class="buy" href="{_e(product.pay_url)}">{_e(label)}</a>'
 
 
@@ -273,6 +297,13 @@ def _bundle(product: Product, config: Config, issues: list[str]) -> str:
                       f"storefront \"{product.name}\" --bundle-price 69.98 "
                       f"--bundle-pay https://...")
         return ""
+    if not _payment_url(product.bundle_pay_url):
+        issues.append("The bundle payment link needs a complete https address "
+                      "from your processor. Correct --bundle-pay before publishing.")
+        return ""
+    if not math.isfinite(product.bundle_price) or product.bundle_price <= 0:
+        issues.append("Set a finite, positive bundle price with --bundle-price.")
+        return ""
     saving = product.price * 2 - product.bundle_price
     if saving <= 0:
         issues.append(f"The bundle at {_money(product.bundle_price, config)} is "
@@ -282,13 +313,14 @@ def _bundle(product: Product, config: Config, issues: list[str]) -> str:
             else "")
     return (f'<div class="card bundle"><b>Two for '
             f"{_e(_money(product.bundle_price, config))}</b>"
-            f'<p class="fine">{_e(deal)}. Same delivery, one parcel.</p>'
+            f'<p class="fine">{_e(deal)}.</p>'
             f'<a class="buy second" href="{_e(product.bundle_pay_url)}">'
             f"Buy two - {_e(_money(product.bundle_price, config))}</a></div>")
 
 
 def build(product: Product, config: Config, problem: str = "",
-          outcome: str = "", site: bool = False) -> Page:
+          outcome: str = "", site: bool = False,
+          content: shop_content.Content | None = None) -> Page:
     """Render the page and collect everything still between it and going live.
 
     ``problem`` and ``outcome`` fall back to whatever is stored on the product,
@@ -298,13 +330,17 @@ def build(product: Product, config: Config, problem: str = "",
     listing = listings.generate(product, ue, problem or product.copy_problem,
                                 outcome or product.copy_outcome)
     issues: list[str] = []
+    if not math.isfinite(product.price) or product.price <= 0:
+        issues.append("Set a finite, positive product price before publishing.")
+    if not math.isfinite(product.delivery_days) or product.delivery_days <= 0:
+        issues.append("Set a verified, positive delivery_days estimate before publishing.")
 
     blockers = research.score_product(product, config).blockers
     if blockers:
         issues.append(f"This product fails a research gate: {blockers[0]} A shop "
                       f"page cannot fix that.")
 
-    days = f"{product.delivery_days:.0f}"
+    days = _delivery(product.delivery_days)
     title = listing.titles[0]
     photos = _photos(product, issues)
     buy = _buy(product, config, issues)
@@ -339,7 +375,7 @@ def build(product: Product, config: Config, problem: str = "",
     else:
         head = (f'<span class="brand">{_e(config.business_name)}</span>'
                 f'<span class="ship">Delivery included &middot; arrives in '
-                f"about {days} days</span>")
+                f"about {_copy(days)} days</span>")
         foot = '<a href="#policies">Delivery, returns and contact</a>'
 
     body = f"""<header class="bar">{head}</header>
@@ -349,7 +385,7 @@ def build(product: Product, config: Config, problem: str = "",
   <div class="buybox">
     <h1>{_copy(title)}</h1>
     <p class="sub">{_copy(listing.subtitle)}</p>
-    <p class="price">{_e(_money(product.price, config))}
+    <p class="price">{_e(_price(product, config))}
       <span class="note">delivery included</span></p>
     <ul class="trust">{"".join(f"<li>{_copy(t)}</li>" for t in trust)}</ul>
     {buy}
@@ -362,18 +398,13 @@ def build(product: Product, config: Config, problem: str = "",
   <ul class="sell">{"".join(f"<li>{_copy(b)}</li>" for b in listing.bullets)}</ul>
 </section>
 <section>{_prose(listing.description, title)}</section>
-<section><h2>Reviews</h2><div class="card">
-  <p>{_copy("{Paste your real reviews here, with photos where you have them. "
-            "Invent none: fabricated reviews are illegal, and they are the first "
-            "thing a card network checks in a dispute.}")}</p></div>
-</section>
 <section><h2>Questions</h2>{faq}</section>
 <section id="policies"><h2>Delivery, returns and contact</h2>
   {"".join(f"<h3>{_e(h)}</h3><p>{_copy(t)}</p>" for h, t in policies)}
 </section>
 </main>
 <footer>{_e(config.business_name)} &middot; {foot}</footer>
-<div class="sticky"><span class="price">{_e(_money(product.price, config))}</span>
+<div class="sticky"><span class="price">{_e(_price(product, config))}</span>
 {_buy(product, config, issues, sticky=True)}</div>"""
 
     page = Page(html=f"""<!doctype html>
@@ -385,13 +416,14 @@ def build(product: Product, config: Config, problem: str = "",
 {body}
 </body></html>""", issues=issues)
 
-    # Counted on the body alone: the stylesheet is full of braces that are not slots.
-    page.slots = len(_SLOT.findall(body))
+    page.html = shop_content.fill(page.html, (content or shop_content.Content()).for_product(product))
+    # Include metadata as well as body copy, but never count stylesheet braces.
+    page.slots = len(_SLOT.findall(_body_of(page.html)))
     if page.slots:
         issues.append(
             f"{page.slots} slots are still in braces and highlighted on the page. "
-            f"Open the file in any text editor and replace each one - an unfilled "
-            f"{{slot}} is the fastest way to look like a scam.")
+            "Save the answers in the store's .content.json file so they survive "
+            "rebuilding. Create one with: dropship site --content-template <file>")
     if page.size > _MAX_PAGE:
         issues.append(f"The page is {page.size / 1_000_000:.1f} MB. Compress the "
                       f"photos; on 4G this is several seconds of blank screen.")
@@ -453,8 +485,8 @@ POLICIES = {
          "the card you paid with. Banks then take another 5-10 days to show "
          "it, which is their timing and not ours."),
         ("Damaged or wrong on arrival",
-         "Do not send it back. Email a photo and we replace or refund it "
-         "straight away."),
+         "{Your process and remedies for damaged or incorrect goods, including "
+         "any evidence needed and who pays return shipping.}"),
     )),
     "shipping.html": ("Delivery", (
         ("Handling",
@@ -543,8 +575,10 @@ def _shell(config: Config, title: str, body: str, current: str = "",
 
 def _policy_page(config: Config, filename: str, products: list[Product]) -> str:
     title, sections = POLICIES[filename]
-    days = sorted({p.delivery_days for p in products}) or [14.0]
-    transit = (f"About {days[0]:.0f} days to your door."
+    days = sorted({p.delivery_days for p in products
+                   if math.isfinite(p.delivery_days) and p.delivery_days > 0})
+    transit = ("{your verified delivery estimate}" if not days else
+               f"About {days[0]:.0f} days to your door."
                if len(days) == 1 else
                f"Between about {days[0]:.0f} and {days[-1]:.0f} days to your "
                f"door, depending on the item.")
@@ -563,9 +597,9 @@ def _index_page(config: Config, products: list[Product], issues: list[str]) -> s
         cards.append(
             f'<a class="tile" href="{_e(page_name(product))}">'
             f'{_thumb(product)}<span class="name">{_e(product.name)}</span>'
-            f'<span class="price">{_e(_money(product.price, config))}</span>'
+            f'<span class="price">{_e(_price(product, config))}</span>'
             f'<span class="fine">Delivery included, about '
-            f"{product.delivery_days:.0f} days</span></a>")
+            f"{_copy(_delivery(product.delivery_days))} days</span></a>")
     if not products:
         issues.append("No products are in a state that belongs in a shop "
                       "window. Approve or launch one first: dropship product "
@@ -589,27 +623,27 @@ def _thumb(product: Product) -> str:
 
 
 def _thanks_page(config: Config, products: list[Product]) -> str:
-    days = max((p.delivery_days for p in products), default=14.0)
+    days = _delivery(max((p.delivery_days for p in products), default=0.0))
     others = [p for p in products if p.pay_url][:3]
     more = ""
     if others:
         rows = "".join(
             f'<a class="tile" href="{_e(page_name(p))}">{_thumb(p)}'
             f'<span class="name">{_e(p.name)}</span>'
-            f'<span class="price">{_e(_money(p.price, config))}</span></a>'
+            f'<span class="price">{_e(_price(p, config))}</span></a>'
             for p in others)
         more = (f'<section><h2>Also from {_e(config.business_name)}</h2>'
                 f'<p class="fine">If you add another order in the next day or '
                 f'two we can usually ship them together.</p>'
                 f'<div class="tiles">{rows}</div></section>')
     body = f"""<main>
-<section><h1>Thank you - your order is confirmed</h1>
-<p>A receipt is on its way to your email from our payment provider. Keep it:
-it has your order number.</p>
+<section><h1>Thank you for your order</h1>
+<p>Check your payment provider's receipt for confirmation and your order number.
+This page cannot verify payment. If you have no receipt, contact us before paying again.</p>
 <h3>What happens now</h3>
 <p>We place your order with the warehouse within {{your handling time, e.g. 2}}
 business days, then email you a tracking link. Expect the parcel within about
-{days:.0f} days - the estimate on the product you bought is the one that
+{days} days - the estimate on the product you bought is the one that
 applies.</p>
 <h3>If something looks wrong</h3>
 <p>Email {{your support email}} with your order number. We answer within
@@ -617,7 +651,7 @@ applies.</p>
 {more}
 </main>"""
     return _shell(config, f"Thank you - {config.business_name}",
-                  _copy_block(body), "", "Your order is confirmed")
+                  _copy_block(body), "", "Check your receipt and next steps")
 
 
 def _copy_block(html: str) -> str:
@@ -646,15 +680,24 @@ class Site:
     def total_slots(self) -> int:
         return sum(self.slots.values())
 
+    @property
+    def publishable(self) -> bool:
+        return not self.issues
 
-def build_site(products: list[Product], config: Config) -> Site:
+
+def build_site(products: list[Product], config: Config,
+               content: shop_content.Content | None = None) -> Site:
     """The whole shop: a page per product, the policy pages, and a thank-you page."""
     site = Site()
+    content = content or shop_content.Content()
     site.products = [p for p in products if p.status in SELLING]
 
     for product in site.products:
-        page = build(product, config, site=True)
+        page = build(product, config, site=True, content=content)
         name = page_name(product)
+        if name in {"index.html", "thanks.html", *POLICIES} or name in site.files:
+            raise ValueError(f"Duplicate or reserved product filename '{name}'. "
+                             "Give every product a distinct SKU before generating the site.")
         site.files[name] = page.html
         site.slots[name] = page.slots
         # Name the product, or a five-page report says "no payment link" twice.
@@ -666,6 +709,7 @@ def build_site(products: list[Product], config: Config) -> Site:
     for name in POLICIES:
         site.files[name] = _policy_page(config, name, site.products)
     for name in ["index.html", "thanks.html", *POLICIES]:
+        site.files[name] = shop_content.fill(site.files[name], content.shared)
         site.slots[name] = len(_SLOT.findall(_body_of(site.files[name])))
 
     if site.total_slots:
@@ -673,9 +717,8 @@ def build_site(products: list[Product], config: Config) -> Site:
         where = ", ".join(f"{name} ({count})" for name, count in worst if count)
         site.issues.append(
             f"{site.total_slots} slots still to fill, most of them in {where}. "
-            f"Every one is an answer only you have. A shop with {{braces}} "
-            f"showing converts nobody, and the policy pages are what a payment "
-            f"provider reads before it approves your account.")
+            "Save factual answers in the store's .content.json file, then rebuild. "
+            "Create the answer sheet with: dropship site --content-template <file>")
     return site
 
 
@@ -686,6 +729,11 @@ def _body_of(page: str) -> str:
 
 def write_site(site: Site, out_dir: Path | str) -> list[Path]:
     target = Path(out_dir)
+    stale = {p.name for p in target.glob("*.html")} - set(site.files)
+    if stale:
+        raise ValueError("Output contains pages not in this shop: "
+                         + ", ".join(sorted(stale))
+                         + ". Use a fresh --out folder or archive the old folder first.")
     target.mkdir(parents=True, exist_ok=True)
     written = []
     for name, page in site.files.items():
@@ -708,9 +756,10 @@ def notes(site: Site, config: Config, out_dir: Path | str) -> str:
         "",
         "## 1. Fill in the blanks first",
         "",
-        "Anything in {braces} is highlighted in yellow on the page and is an "
-        "answer only you have. Open each file in a text editor and replace "
-        "them. The counts:",
+        "Save answers to the highlighted {braces} in the private .content.json "
+        "file beside your store. `site --content-template <file>` creates the "
+        "answer sheet. Rebuild with `site --content <file> --ready`; this refuses "
+        "to write a shop with outstanding issues. The counts:",
         "",
     ]
     for name, count in sorted(site.slots.items(), key=lambda kv: -kv[1]):
@@ -749,8 +798,10 @@ def notes(site: Site, config: Config, out_dir: Path | str) -> str:
         "",
         "## 4. When orders arrive",
         "",
-        "They land in your payment provider, not in this folder. Export their "
-        "CSV and run:",
+        "They land in your payment provider, not in this folder. Validate a "
+        "sandbox order export in a separate test store first: a payment report "
+        "may lack the product, quantity or shipping address needed for fulfillment. "
+        "For supported Shopify/WooCommerce order CSVs, run:",
         "",
         "```bash",
         "python3 -m dropship import orders ~/Downloads/payments.csv",

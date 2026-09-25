@@ -6,6 +6,11 @@ Business account. The first sales market is still undecided.
 Amounts below are proposed spending ceilings, not supplier quotes, forecasts,
 or committed expenses. Actual spending in this session: $0.
 
+Reviewed 25 September: the official registration threshold, PayPal fee tables
+and payment-link instructions were rechecked. Registration/account status has
+not been updated by the owner. See the [new sourcing screen](sourcing-decision.md)
+and [current workspace and handoff](../START-BUSINESS.md).
+
 ## Budget and release conditions
 
 | Purpose | USD ceiling | Release condition |
@@ -51,10 +56,15 @@ countries. No tax classification or return has been filed in this session.
 ### Registration field guide
 
 Start with the [official registration instructions](https://www.gov.il/he/service/request-open-exempt-dealer-via-internet)
-and check eligibility before beginning. The interactive application was not
-opened in this session: no browser connection was available, and the research
-tool could only retrieve indexed government-page text, not the full live form.
-The labels below describe information to prepare, not a verified screen sequence.
+and check eligibility before beginning. On 25 September the official service's
+“להגשת הבקשה” link was opened in Chrome. It leads through
+`secapp.taxes.gov.il/srBksOpenTik/StartPage.aspx#/guidelines_o` to the Tax
+Authority sign-in screen at `secapp.taxes.gov.il/taxes-login/login/general`.
+The visible fields are **מספר זהות** (identity number) and **קוד משתמש קבוע**
+(permanent user code), with a link **הרשמה או הפקת קוד קבוע חדש** for registration
+or a new code. Enter those privately on the official site. No identity information
+was entered or application submitted. The business form remains behind sign-in;
+the labels below are preparation guidance, not a verified post-login sequence.
 
 | Information | What to prepare |
 | --- | --- |
